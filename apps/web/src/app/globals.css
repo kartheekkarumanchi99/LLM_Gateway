@@ -1,0 +1,29 @@
+@import 'tailwindcss';
+
+:root {
+  --brand: #7c5cff;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: #ffffff;
+  color: #111827;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Thin scrollbar for the sidebar / scroll areas. */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 9999px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}

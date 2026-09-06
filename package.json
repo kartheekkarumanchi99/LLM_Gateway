@@ -1,0 +1,20 @@
+{
+  "name": "llm-gateway",
+  "private": true,
+  "version": "0.1.0",
+  "description": "OpenAI-compatible multi-provider LLM gateway (OpenRouter-style) built on Neon + OpenAI. Vendor-neutral.",
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --filter @llmgw/gateway dev",
+    "dev:gateway": "pnpm --filter @llmgw/gateway dev",
+    "build": "pnpm -r build",
+    "db:push": "pnpm --filter @llmgw/db push",
+    "db:generate": "pnpm --filter @llmgw/db generate",
+    "db:seed": "pnpm --filter @llmgw/db seed",
+    "db:sync-catalog": "pnpm --filter @llmgw/db sync:catalog"
+  },
+  "packageManager": "pnpm@10.9.0",
+  "engines": {
+    "node": ">=20"
+  }
+}

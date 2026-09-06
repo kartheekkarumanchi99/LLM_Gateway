@@ -1,0 +1,7 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# pnpm 10 skips native/build scripts unless listed here.
+onlyBuiltDependencies:
+  - esbuild

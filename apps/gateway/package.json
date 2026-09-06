@@ -1,0 +1,27 @@
+{
+  "name": "@llmgw/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "build": "tsup",
+    "test": "node --import tsx --test src/routing/score.test.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.1",
+    "@llmgw/db": "workspace:*",
+    "dotenv": "^16.4.7",
+    "drizzle-orm": "^0.36.4",
+    "fastify": "^5.1.0",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/pg": "^8.11.10",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
