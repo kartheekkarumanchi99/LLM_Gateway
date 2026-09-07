@@ -16,6 +16,14 @@ interface GatewayResponse {
   choices?: Array<{ message?: { content?: unknown } }>;
   usage?: Record<string, unknown>;
   _routing?: Record<string, unknown>;
+  _orchestration?: {
+    pattern?: unknown;
+    legs?: unknown;
+    requestedN?: unknown;
+    completedN?: unknown;
+    diversityMode?: unknown;
+    judgeReason?: unknown;
+  };
   model?: unknown;
   error?: { message?: unknown };
 }
@@ -78,6 +86,7 @@ export async function playgroundChat(opts: {
   messages: ChatMessage[];
   model: string;
   costTier?: string;
+  orchestrate?: string;
 }): Promise<ChatResult> {
   const ctx = await getCurrentWorkspace();
   if (!ctx) return errorResult('No workspace connected. Set up the database first.');
@@ -91,6 +100,7 @@ export async function playgroundChat(opts: {
 
   const body: Record<string, unknown> = { model: opts.model, messages: opts.messages };
   if (opts.costTier) body.cost_tier = opts.costTier;
+  if (opts.orchestrate) body.orchestrate = opts.orchestrate;
 
   const started = Date.now();
   try {
@@ -111,6 +121,20 @@ export async function playgroundChat(opts: {
 
     const usage = json.usage ?? {};
     const routing = json._routing ?? {};
+    const orch = json._orchestration;
+    const legs = Array.isArray(orch?.legs)
+      ? (orch.legs as unknown[]).map((l) => {
+          const o = (l ?? {}) as Record<string, unknown>;
+          return {
+            role: str(o.role) ?? '',
+            model: str(o.model) ?? '',
+            costUsd: num(o.costUsd),
+            outcome: str(o.outcome),
+            displayOrder: typeof o.displayOrder === 'number' ? o.displayOrder : null,
+            temperature: typeof o.temperature === 'number' ? o.temperature : null,
+          };
+        })
+      : undefined;
     const content = str(json.choices?.[0]?.message?.content) ?? '';
     const completionTokens = num(usage.completion_tokens);
     return {
@@ -126,6 +150,12 @@ export async function playgroundChat(opts: {
       cost: num(usage.cost),
       durationMs,
       tokensPerSec: durationMs > 0 ? completionTokens / (durationMs / 1000) : 0,
+      pattern: orch ? str(orch.pattern) : null,
+      legs,
+      requestedN: orch && typeof orch.requestedN === 'number' ? orch.requestedN : null,
+      completedN: orch && typeof orch.completedN === 'number' ? orch.completedN : null,
+      diversityMode: orch ? str(orch.diversityMode) : null,
+      judgeReason: orch ? str(orch.judgeReason) : null,
     };
   } catch (err) {
     return errorResult(

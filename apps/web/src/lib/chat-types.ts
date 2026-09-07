@@ -5,6 +5,15 @@ export interface ChatMessage {
   content: string;
 }
 
+export interface ChatLeg {
+  role: string;
+  model: string;
+  costUsd: number;
+  outcome?: string | null;
+  displayOrder?: number | null;
+  temperature?: number | null;
+}
+
 export interface ChatMeta {
   model: string;
   provider: string | null;
@@ -17,6 +26,12 @@ export interface ChatMeta {
   cost: number;
   durationMs: number;
   tokensPerSec: number;
+  pattern?: string | null;
+  legs?: ChatLeg[];
+  requestedN?: number | null;
+  completedN?: number | null;
+  diversityMode?: string | null;
+  judgeReason?: string | null;
 }
 
 export interface ChatResult extends ChatMeta {

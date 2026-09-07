@@ -15,6 +15,8 @@ interface Item {
   error?: boolean;
 }
 
+type OrchestrationMode = 'single' | 'cascade' | 'critique' | 'bestofn';
+
 const COST_TIERS = ['low', 'medium', 'high', 'max'];
 
 const EXAMPLES = [
@@ -39,6 +41,7 @@ export function ChatView({ models }: { models: RunnableModel[] }) {
   const [input, setInput] = useState('');
   const [model, setModel] = useState('auto');
   const [costTier, setCostTier] = useState('medium');
+  const [mode, setMode] = useState<OrchestrationMode>('single');
   const [pending, setPending] = useState(false);
   const idRef = useRef(0);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -58,7 +61,12 @@ export function ChatView({ models }: { models: RunnableModel[] }) {
     setItems((prev) => [...prev, userItem]);
     setInput('');
     setPending(true);
-    const res: ChatResult = await sendChat({ messages: convo, model, costTier });
+    const res: ChatResult = await sendChat({
+      messages: convo,
+      model,
+      costTier,
+      orchestrate: mode === 'single' ? undefined : mode,
+    });
     setPending(false);
     setItems((prev) => [
       ...prev,
@@ -86,6 +94,21 @@ export function ChatView({ models }: { models: RunnableModel[] }) {
                 {m.slug}
               </option>
             ))}
+          </select>
+          <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+        </div>
+
+        <div className="relative">
+          <select
+            value={mode}
+            onChange={(e) => setMode(e.target.value as OrchestrationMode)}
+            className="appearance-none rounded-lg border border-gray-300 bg-white py-1.5 pl-3 pr-8 text-sm text-gray-700 outline-none focus:border-violet-500"
+            title="Workflow: Single routes to one model; Cascade drafts cheap then escalates on a quality gate; Critique drafts, reviews, and revises; Best-of-N runs several cheap models in parallel and a judge picks the winner."
+          >
+            <option value="single">Single</option>
+            <option value="cascade">Cascade</option>
+            <option value="critique">Critique</option>
+            <option value="bestofn">Best-of-N</option>
           </select>
           <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
         </div>
@@ -248,17 +271,62 @@ function AssistantMessage({ item }: { item: Item }) {
             </button>
 
             {open ? (
-              <dl className="mt-2 grid max-w-md grid-cols-2 gap-x-6 gap-y-1.5 rounded-lg border border-gray-200 bg-white p-3 text-xs">
-                <Row label="Model" value={meta.model} />
-                <Row label="Provider" value={meta.provider ?? '—'} />
-                <Row label="Strategy" value={meta.mode ?? '—'} />
-                <Row label="Task class" value={meta.task ?? '—'} />
-                <Row label="Tokens / sec" value={meta.tokensPerSec > 0 ? meta.tokensPerSec.toFixed(1) : '—'} />
-                <Row label="Token count" value={`${meta.totalTokens} (${meta.promptTokens}+${meta.completionTokens})`} />
-                <Row label="Cost" value={fmtCost(meta.cost)} />
-                <Row label="Duration" value={fmtDuration(meta.durationMs)} />
-                <Row label="Attempts" value={meta.attempts != null ? String(meta.attempts) : '—'} />
-              </dl>
+              <div className="mt-2 space-y-2">
+                <dl className="grid max-w-md grid-cols-2 gap-x-6 gap-y-1.5 rounded-lg border border-gray-200 bg-white p-3 text-xs">
+                  <Row label="Model" value={meta.model} />
+                  <Row label="Provider" value={meta.provider ?? '\u2014'} />
+                  <Row label="Strategy" value={meta.mode ?? '\u2014'} />
+                  <Row label="Task class" value={meta.task ?? '\u2014'} />
+                  <Row label="Tokens / sec" value={meta.tokensPerSec > 0 ? meta.tokensPerSec.toFixed(1) : '\u2014'} />
+                  <Row label="Token count" value={`${meta.totalTokens} (${meta.promptTokens}+${meta.completionTokens})`} />
+                  <Row label="Cost" value={fmtCost(meta.cost)} />
+                  <Row label="Duration" value={fmtDuration(meta.durationMs)} />
+                  <Row label="Attempts" value={meta.attempts != null ? String(meta.attempts) : '\u2014'} />
+                </dl>
+                {meta.legs && meta.legs.length > 0 ? (
+                  <div className="max-w-md rounded-lg border border-gray-200 bg-white p-3 text-xs">
+                    <div className="mb-1.5 flex items-center justify-between gap-2">
+                      <span className="font-medium text-gray-600">Workflow legs ({meta.pattern})</span>
+                      {meta.completedN != null && meta.requestedN != null ? (
+                        <span className="text-gray-400">
+                          {meta.completedN}/{meta.requestedN}
+                          {meta.diversityMode ? ` \u00b7 ${meta.diversityMode}` : ''}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="space-y-1">
+                      {meta.legs.map((l, i) => (
+                        <div key={i} className="flex items-center justify-between gap-2">
+                          <span className="w-16 shrink-0 truncate text-gray-400">
+                            {l.role}
+                            {l.displayOrder != null ? ` \u00b7 #${l.displayOrder}` : ''}
+                          </span>
+                          <span className="flex-1 truncate font-mono text-gray-700">{l.model}</span>
+                          {l.outcome && l.outcome !== 'ok' ? (
+                            <span
+                              className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${
+                                l.outcome === 'selected' || l.outcome === 'accepted'
+                                  ? 'bg-emerald-50 text-emerald-600'
+                                  : l.outcome === 'rejected'
+                                    ? 'bg-amber-50 text-amber-600'
+                                    : 'bg-gray-100 text-gray-500'
+                              }`}
+                            >
+                              {l.outcome}
+                            </span>
+                          ) : null}
+                          <span className="w-14 shrink-0 text-right text-gray-400">{fmtCost(l.costUsd)}</span>
+                        </div>
+                      ))}
+                    </div>
+                    {meta.judgeReason ? (
+                      <div className="mt-2 border-t border-gray-100 pt-2 text-gray-500">
+                        <span className="text-gray-400">Judge:</span> {meta.judgeReason}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
             ) : null}
           </div>
         ) : null}

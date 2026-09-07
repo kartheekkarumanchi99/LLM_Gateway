@@ -7,6 +7,7 @@ export async function sendChat(opts: {
   messages: ChatMessage[];
   model: string;
   costTier?: string;
+  orchestrate?: string;
 }): Promise<ChatResult> {
   return playgroundChat(opts);
 }

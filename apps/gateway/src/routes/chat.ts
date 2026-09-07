@@ -14,6 +14,7 @@ import { getObservabilityConfig } from '../observability/config';
 import { emitObservability } from '../observability/emit';
 import { runClassifiersForRequest } from '../classifiers/run';
 import { maybeLowBalanceAlert } from '../notifications/alerts';
+import { runOrchestration } from '../orchestration/run';
 import type { PresetParameters } from '@llmgw/db';
 import { recordUsage } from '../billing/record';
 import { keyUsageUsd, getWorkspaceBudget, workspaceUsageUsd } from '../billing/usage';
@@ -176,6 +177,78 @@ export function registerChat(app: FastifyInstance): void {
     const maxTokens = Number((body as { max_tokens?: number }).max_tokens ?? 512);
     const taskClass = classifyTask(messages);
     const trace: RoutingTrace = { mode: 'explicit', taskClass, costTier, attempts: [] };
+
+    // ---- Compound orchestration (HydraFusion-style): draft -> gate/critique -> escalate/revise ----
+    const orchestrateRaw = (body as { orchestrate?: unknown }).orchestrate;
+    if (
+      !body.stream &&
+      (orchestrateRaw === 'cascade' || orchestrateRaw === 'critique' || orchestrateRaw === 'bestofn')
+    ) {
+      const result = await runOrchestration({
+        pattern: orchestrateRaw,
+        messages,
+        ctx: {
+          orgId: auth.orgId,
+          workspaceId: auth.workspaceId,
+          apiKeyId: auth.apiKeyId,
+          requestId,
+          appName,
+          guardrail,
+          allowedModels: routingConfig.autoAllowedModels,
+          maxTokens,
+        },
+      });
+      if (result.error && !result.content) {
+        return reply
+          .code(502)
+          .send({ error: { message: result.error, type: 'orchestration_error' } });
+      }
+      // Output guardrail: the SELECTED final answer must pass workspace content policy.
+      if (guardrail) {
+        const out = checkContent(guardrail, [{ role: 'assistant', content: result.content }]);
+        if (out.block) {
+          return reply
+            .code(400)
+            .send({ error: { message: out.reason ?? 'Blocked by output guardrail.', type: 'guardrail_blocked' } });
+        }
+      }
+      void maybeLowBalanceAlert(auth.orgId, auth.workspaceId);
+      return reply.send({
+        id: `orch-${requestId}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: result.chosenModel,
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: result.content },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: {
+          prompt_tokens: result.promptTokens,
+          completion_tokens: result.completionTokens,
+          total_tokens: result.totalTokens,
+          cost: result.totalCostUsd,
+        },
+        _routing: {
+          task: result.taskClass,
+          mode: `orchestrate:${result.pattern}`,
+          chosen: result.chosenModel,
+          provider: result.chosenModel.split('/')[0],
+          attempts: result.legs.length,
+        },
+        _orchestration: {
+          pattern: result.pattern,
+          totalCostUsd: result.totalCostUsd,
+          requestedN: result.requestedN,
+          completedN: result.completedN,
+          diversityMode: result.diversityMode,
+          judgeReason: result.judgeReason,
+          legs: result.legs,
+        },
+      });
+    }
 
     // ---- Model routing: build the ordered candidate list ----
     const candidates: CandidateModel[] = [];
