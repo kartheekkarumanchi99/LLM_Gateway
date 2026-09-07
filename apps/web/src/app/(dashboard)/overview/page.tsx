@@ -11,8 +11,10 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { getWeeklyUsage } from '@/lib/overview';
+import { getSavings } from '@/lib/savings';
 import { getCurrentWorkspace } from '@/lib/session';
 import { formatUsd } from '@/lib/format';
+import { SavingsPanel } from '@/components/savings-panel';
 
 export const dynamic = 'force-dynamic';
 
@@ -56,6 +58,7 @@ export default async function OverviewPage() {
     : { spendUsd: 0, requests: 0, tokens: 0, byModel: [] };
   const ws = ctx?.workspace;
   const top = usage.byModel[0];
+  const savings = ctx ? await getSavings(ctx.org.id) : null;
 
   return (
     <div>
@@ -70,6 +73,12 @@ export default async function OverviewPage() {
           Not connected to a database yet. Set <code className="font-mono">DATABASE_URL</code>, then run{' '}
           <code className="font-mono">pnpm db:push</code>, <code className="font-mono">pnpm db:sync-catalog</code>, and{' '}
           <code className="font-mono">pnpm db:seed</code>.
+        </div>
+      ) : null}
+
+      {savings ? (
+        <div className="mt-8">
+          <SavingsPanel data={savings} />
         </div>
       ) : null}
 

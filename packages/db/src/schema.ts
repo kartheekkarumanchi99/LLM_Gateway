@@ -25,6 +25,8 @@ export const users = pgTable('users', {
     .references(() => organizations.id, { onDelete: 'cascade' }),
   email: text('email').notNull().unique(),
   name: text('name'),
+  // scrypt hash; null for accounts created before auth (e.g. the demo seed user).
+  passwordHash: text('password_hash'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -385,5 +387,43 @@ export const notifications = pgTable(
   },
   (t) => ({
     orgIdx: index('notifications_org_idx').on(t.orgId, t.createdAt),
+  }),
+);
+
+// A user's membership in an org (foundation for multi-tenant access + RBAC).
+export const memberships = pgTable(
+  'memberships',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    // 'owner' | 'admin' | 'member'
+    role: text('role').notNull().default('member'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    userOrgUq: uniqueIndex('memberships_user_org_uq').on(t.userId, t.orgId),
+    orgIdx: index('memberships_org_idx').on(t.orgId),
+  }),
+);
+
+// Server-side sessions. The cookie holds the raw token; only its hash is stored.
+export const sessions = pgTable(
+  'sessions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    tokenHash: text('token_hash').notNull().unique(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    userIdx: index('sessions_user_idx').on(t.userId),
   }),
 );

@@ -1,5 +1,9 @@
-import { PagePlaceholder } from '@/components/page-placeholder';
+import { listRunnableModels } from '@/lib/models';
+import { ChatView } from '@/components/chat-view';
 
-export default function Page() {
-  return <PagePlaceholder title="Chat" description="Chat with any model in the playground." />;
+export const dynamic = 'force-dynamic';
+
+export default async function ChatPage() {
+  const models = await listRunnableModels();
+  return <ChatView models={models} />;
 }

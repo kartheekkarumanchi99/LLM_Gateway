@@ -428,7 +428,13 @@ export function registerChat(app: FastifyInstance): void {
           ...json,
           model: cand.slug,
           usage: { ...(json.usage as object | undefined), cost },
-          _routing: { task: taskClass, mode: trace.mode, chosen: cand.slug },
+          _routing: {
+            task: taskClass,
+            mode: trace.mode,
+            chosen: cand.slug,
+            provider: cand.providerSlug,
+            attempts: trace.attempts.length,
+          },
         };
         return reply.send(enriched);
       } catch (err) {

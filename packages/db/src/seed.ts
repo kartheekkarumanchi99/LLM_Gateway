@@ -12,7 +12,7 @@ for (const rel of ['.env', '../.env', '../../.env']) {
 
 import { createHash, randomBytes } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import { apiKeys, getDb, models, modelTaskPriors, organizations, providers, users, workspaces } from './index';
+import { apiKeys, getDb, memberships, models, modelTaskPriors, organizations, providers, users, workspaces } from './index';
 
 function genApiKey() {
   const raw = 'sk-llmgw-' + randomBytes(24).toString('hex');
@@ -119,8 +119,17 @@ async function main() {
   const existingUser = (
     await db.select().from(users).where(eq(users.email, 'demo@example.com'))
   )[0];
-  if (!existingUser) {
-    await db.insert(users).values({ orgId: org.id, email: 'demo@example.com', name: 'Demo User' });
+  const demoUser =
+    existingUser ??
+    (await db
+      .insert(users)
+      .values({ orgId: org.id, email: 'demo@example.com', name: 'Demo User' })
+      .returning())[0];
+  if (demoUser) {
+    await db
+      .insert(memberships)
+      .values({ userId: demoUser.id, orgId: org.id, role: 'owner' })
+      .onConflictDoNothing();
   }
 
   const existingWorkspace = (

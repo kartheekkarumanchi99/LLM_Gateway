@@ -21,6 +21,7 @@ import * as schema from './schema';
 export * from './schema';
 export { schema };
 export * from './crypto';
+export * from './auth';
 export * from './policies';
 export * from './routing-config';
 export * from './observability';

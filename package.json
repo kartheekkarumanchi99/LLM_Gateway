@@ -11,7 +11,9 @@
     "db:push": "pnpm --filter @llmgw/db push",
     "db:generate": "pnpm --filter @llmgw/db generate",
     "db:seed": "pnpm --filter @llmgw/db seed",
-    "db:sync-catalog": "pnpm --filter @llmgw/db sync:catalog"
+    "db:sync-catalog": "pnpm --filter @llmgw/db sync:catalog",
+    "db:verify": "pnpm --filter @llmgw/db verify",
+    "probe": "pnpm --filter @llmgw/db probe"
   },
   "packageManager": "pnpm@10.9.0",
   "engines": {

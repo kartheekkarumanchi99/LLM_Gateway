@@ -1,8 +1,10 @@
 'use server';
 
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
+import { cookies } from 'next/headers';
 import { revalidatePath } from 'next/cache';
 import { getHttpDb, workspaces } from '@llmgw/db/http';
+import { ACTIVE_WORKSPACE_COOKIE } from './auth';
 import { getCurrentOrg } from './session';
 
 export interface ActionState {
@@ -69,6 +71,27 @@ export async function createWorkspace(
     budgetLimitUsd,
   });
 
+  revalidatePath('/');
+  return { ok: true };
+}
+
+// Switches the active workspace (validated to belong to the current org).
+export async function setActiveWorkspace(id: string): Promise<{ ok: boolean }> {
+  const org = await getCurrentOrg();
+  if (!org) return { ok: false };
+  const db = getHttpDb();
+  const rows = await db
+    .select({ id: workspaces.id })
+    .from(workspaces)
+    .where(and(eq(workspaces.id, id), eq(workspaces.orgId, org.id)))
+    .limit(1);
+  if (!rows[0]) return { ok: false };
+  (await cookies()).set(ACTIVE_WORKSPACE_COOKIE, id, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/',
+  });
   revalidatePath('/');
   return { ok: true };
 }

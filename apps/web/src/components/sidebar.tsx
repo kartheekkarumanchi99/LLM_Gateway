@@ -23,6 +23,7 @@ import {
   Wrench,
   type LucideIcon,
 } from 'lucide-react';
+import { UserMenu } from '@/components/user-menu';
 
 interface NavItem {
   label: string;
@@ -77,7 +78,13 @@ function NavLink({ item, active }: { item: NavItem; active: boolean }) {
   );
 }
 
-export function Sidebar() {
+export function Sidebar({
+  accountEmail,
+  workspaceName,
+}: {
+  accountEmail?: string | null;
+  workspaceName?: string | null;
+}) {
   const pathname = usePathname();
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + '/');
 
@@ -91,7 +98,7 @@ export function Sidebar() {
           <span className="grid h-5 w-5 place-items-center rounded bg-gray-100 text-[11px] text-gray-500">
             W
           </span>
-          <span className="flex-1 truncate">Default Workspace</span>
+          <span className="flex-1 truncate">{workspaceName ?? 'Default Workspace'}</span>
           <ChevronsUpDown className="h-4 w-4 text-gray-400" />
         </Link>
       </div>
@@ -108,6 +115,12 @@ export function Sidebar() {
           <NavLink key={item.href} item={item} active={isActive(item.href)} />
         ))}
       </nav>
+
+      {accountEmail ? (
+        <div className="border-t border-gray-200 p-3">
+          <UserMenu email={accountEmail} />
+        </div>
+      ) : null}
     </aside>
   );
 }

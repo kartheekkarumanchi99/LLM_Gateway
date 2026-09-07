@@ -1,7 +1,9 @@
-import { PagePlaceholder } from '@/components/page-placeholder';
+import { listCatalogModels } from '@/lib/models';
+import { ModelsView } from '@/components/models-view';
 
-export default function Page() {
-  return (
-    <PagePlaceholder title="Models" description="Browse the full catalog of available models." />
-  );
+export const dynamic = 'force-dynamic';
+
+export default async function ModelsPage() {
+  const models = await listCatalogModels();
+  return <ModelsView models={models} />;
 }

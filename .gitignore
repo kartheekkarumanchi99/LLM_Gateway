@@ -16,3 +16,7 @@ pnpm-debug.log*
 .DS_Store
 coverage/
 .turbo/
+
+# Editor / local tooling output
+.vscode/
+.playwright-mcp/
