@@ -13,7 +13,8 @@
     "db:seed": "pnpm --filter @llmgw/db seed",
     "db:sync-catalog": "pnpm --filter @llmgw/db sync:catalog",
     "db:verify": "pnpm --filter @llmgw/db verify",
-    "probe": "pnpm --filter @llmgw/db probe"
+    "probe": "pnpm --filter @llmgw/db probe",
+    "bench": "pnpm --filter @llmgw/db bench"
   },
   "packageManager": "pnpm@10.9.0",
   "engines": {

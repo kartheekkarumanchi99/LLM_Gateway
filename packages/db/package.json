@@ -17,6 +17,7 @@
     "sync:catalog": "tsx src/sync-catalog.ts",
     "verify": "tsx src/verify.ts",
     "probe": "tsx src/probe.ts",
+    "bench": "tsx src/bench.ts",
     "studio": "drizzle-kit studio"
   },
   "dependencies": {

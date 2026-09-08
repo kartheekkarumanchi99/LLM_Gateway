@@ -1,6 +1,9 @@
 import { setDefaultResultOrder } from 'node:dns';
-// Neon resolves dual-stack; IPv6 is black-holed on some networks. Prefer IPv4.
+import { setDefaultAutoSelectFamily } from 'node:net';
+// Neon resolves dual-stack; IPv6 is black-holed on some networks. Force IPv4 and
+// disable Happy Eyeballs so a connection can't race (and hang on) a dead IPv6 route.
 setDefaultResultOrder('ipv4first');
+setDefaultAutoSelectFamily(false);
 
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
@@ -24,7 +27,14 @@ export function getPool(): Pool {
     if (!connectionString) {
       throw new Error('DATABASE_URL is not set (see .env.example).');
     }
-    pool = new Pool({ connectionString, max: 8 });
+    pool = new Pool({
+      connectionString,
+      max: 8,
+      // Fail fast on a black-holed/dead connection instead of hanging the request.
+      connectionTimeoutMillis: 10_000,
+      idleTimeoutMillis: 30_000,
+      keepAlive: true,
+    });
     // Neon free-tier auto-suspends idle connections; log and keep serving.
     pool.on('error', (err) => console.error('[db] pool error:', err.message));
   }

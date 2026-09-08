@@ -254,6 +254,8 @@ export const usageEvents = pgTable(
     latencyMs: integer('latency_ms').notNull().default(0),
     // Whether a customer-provided (BYOK) key served this request.
     byok: boolean('byok').notNull().default(false),
+    // Served from our response cache (exact/semantic) → ~zero upstream cost.
+    cached: boolean('cached').notNull().default(false),
     // Client app label (from X-Title / Referer), like OpenRouter's app attribution.
     appName: text('app_name'),
     cachedTokens: integer('cached_tokens').notNull().default(0),
@@ -287,6 +289,35 @@ export const creditLedger = pgTable(
   (t) => ({
     orgIdx: index('credit_ledger_org_idx').on(t.orgId, t.createdAt),
     refIdx: index('credit_ledger_ref_idx').on(t.ref),
+  }),
+);
+
+// Response cache: exact-match (prompt hash) + semantic (embedding cosine). A hit
+// returns a stored completion at ~zero upstream cost — the biggest, model-agnostic
+// cost lever.
+export const responseCache = pgTable(
+  'response_cache',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    workspaceId: uuid('workspace_id').references(() => workspaces.id, { onDelete: 'cascade' }),
+    // sha256 of the normalized messages — exact-match key.
+    promptHash: text('prompt_hash').notNull(),
+    taskClass: text('task_class'),
+    // text-embedding-3-small vector for semantic matching (stored as JSON array).
+    embedding: jsonb('embedding'),
+    model: text('model').notNull(),
+    provider: text('provider').notNull(),
+    // Stored OpenAI-shaped response body (choices + usage).
+    response: jsonb('response').notNull(),
+    promptTokens: integer('prompt_tokens').notNull().default(0),
+    completionTokens: integer('completion_tokens').notNull().default(0),
+    hitCount: integer('hit_count').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    lastHitAt: timestamp('last_hit_at', { withTimezone: true }),
+  },
+  (t) => ({
+    wsHashIdx: index('response_cache_ws_hash_idx').on(t.workspaceId, t.promptHash),
+    wsTaskIdx: index('response_cache_ws_task_idx').on(t.workspaceId, t.taskClass),
   }),
 );
 

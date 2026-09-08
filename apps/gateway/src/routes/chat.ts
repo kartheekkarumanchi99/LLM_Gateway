@@ -15,6 +15,7 @@ import { emitObservability } from '../observability/emit';
 import { runClassifiersForRequest } from '../classifiers/run';
 import { maybeLowBalanceAlert } from '../notifications/alerts';
 import { runOrchestration } from '../orchestration/run';
+import { lookupCache, storeCache } from '../cache/semantic';
 import type { PresetParameters } from '@llmgw/db';
 import { recordUsage } from '../billing/record';
 import { keyUsageUsd, getWorkspaceBudget, workspaceUsageUsd } from '../billing/usage';
@@ -177,6 +178,60 @@ export function registerChat(app: FastifyInstance): void {
     const maxTokens = Number((body as { max_tokens?: number }).max_tokens ?? 512);
     const taskClass = classifyTask(messages);
     const trace: RoutingTrace = { mode: 'explicit', taskClass, costTier, attempts: [] };
+
+    // ---- Semantic response cache: an exact/semantic hit short-circuits routing
+    // at ~zero upstream cost (the biggest model-agnostic cost lever) ----
+    const cacheEnabled =
+      (process.env.SEMANTIC_CACHE ?? '1') !== '0' &&
+      !body.stream &&
+      (body as { cache?: unknown }).cache !== false &&
+      Number((body as { temperature?: number }).temperature ?? 0) <= 0.5;
+    let cacheEmbedding: number[] | null = null;
+    if (cacheEnabled) {
+      const lookup = await lookupCache(auth.workspaceId, auth.orgId, messages, taskClass);
+      cacheEmbedding = lookup.queryEmbedding;
+      if (lookup.hit) {
+        const h = lookup.hit;
+        const totalTokens = h.promptTokens + h.completionTokens;
+        // Record served tokens at ~zero cost (embedding only) so savings attributes
+        // the full baseline as saved.
+        await recordUsage({
+          requestId,
+          workspaceId: auth.workspaceId,
+          apiKeyId: auth.apiKeyId,
+          orgId: auth.orgId,
+          modelSlug: h.model,
+          providerSlug: h.provider,
+          taskClass,
+          status: 'success',
+          promptTokens: h.promptTokens,
+          completionTokens: h.completionTokens,
+          totalTokens,
+          promptPricePerM: '0',
+          completionPricePerM: '0',
+          overrideCostUsd: h.embedCostUsd,
+          cached: true,
+          appName,
+          latencyMs: Date.now() - started,
+          routingTrace: { mode: 'cache', cacheKind: h.kind },
+        });
+        void maybeLowBalanceAlert(auth.orgId, auth.workspaceId);
+        return reply.send({
+          ...h.response,
+          id: `cache-${requestId}`,
+          model: h.model,
+          usage: { ...(h.response.usage as object | undefined), cost: h.embedCostUsd },
+          _routing: {
+            task: taskClass,
+            mode: `cache:${h.kind}`,
+            chosen: h.model,
+            provider: h.provider,
+            attempts: 0,
+          },
+          _cache: { hit: true, kind: h.kind, similarity: Number(h.similarity.toFixed(4)) },
+        });
+      }
+    }
 
     // ---- Compound orchestration (HydraFusion-style): draft -> gate/critique -> escalate/revise ----
     const orchestrateRaw = (body as { orchestrate?: unknown }).orchestrate;
@@ -497,6 +552,20 @@ export function registerChat(app: FastifyInstance): void {
           completion: completionText,
         });
         void maybeLowBalanceAlert(auth.orgId, auth.workspaceId);
+        if (cacheEnabled) {
+          void storeCache({
+            workspaceId: auth.workspaceId,
+            orgId: auth.orgId,
+            messages,
+            taskClass,
+            response: json,
+            model: cand.slug,
+            provider: cand.providerSlug,
+            promptTokens: usage.promptTokens,
+            completionTokens: usage.completionTokens,
+            embedding: cacheEmbedding,
+          });
+        }
         const enriched = {
           ...json,
           model: cand.slug,

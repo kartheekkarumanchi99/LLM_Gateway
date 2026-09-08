@@ -10,11 +10,9 @@ import {
   Wrench,
   type LucideIcon,
 } from 'lucide-react';
-import { getWeeklyUsage } from '@/lib/overview';
-import { getSavings } from '@/lib/savings';
+import { getFinOps } from '@/lib/finops';
 import { getCurrentWorkspace } from '@/lib/session';
-import { formatUsd } from '@/lib/format';
-import { SavingsPanel } from '@/components/savings-panel';
+import { FinOpsDashboard } from '@/components/finops-dashboard';
 
 export const dynamic = 'force-dynamic';
 
@@ -29,72 +27,32 @@ const FEATURES: { title: string; desc: string; href: string; icon: LucideIcon }[
   { title: 'Settings', desc: 'Edit the workspace name and description.', href: '/settings', icon: Settings },
 ];
 
-function UsageCard({ title, value, model, metric }: { title: string; value: string; model?: string; metric?: string }) {
-  return (
-    <div className="rounded-xl border border-gray-200 bg-white p-5">
-      <div className="text-sm text-gray-500">{title}</div>
-      <div className="mt-1 text-3xl font-semibold text-gray-900">{value}</div>
-      <div className="mt-6 border-t border-gray-100 pt-3">
-        {model ? (
-          <div className="flex items-center justify-between text-sm">
-            <span className="flex items-center gap-2 text-gray-600">
-              <span className="h-2 w-2 rounded-full bg-blue-500" />
-              {model}
-            </span>
-            <span className="text-gray-500">{metric}</span>
-          </div>
-        ) : (
-          <div className="text-sm text-gray-400">No usage yet this week.</div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 export default async function OverviewPage() {
   const ctx = await getCurrentWorkspace();
-  const usage = ctx
-    ? await getWeeklyUsage(ctx.workspace.id)
-    : { spendUsd: 0, requests: 0, tokens: 0, byModel: [] };
   const ws = ctx?.workspace;
-  const top = usage.byModel[0];
-  const savings = ctx ? await getSavings(ctx.org.id) : null;
+  const finops = ctx ? await getFinOps(ctx.org.id) : null;
 
   return (
     <div>
-      <h1 className="text-2xl font-semibold text-gray-900">{ws?.name ?? 'Overview'}</h1>
-      <p className="mt-1 max-w-3xl text-sm text-gray-500">
-        {ws?.description ??
-          'A summary of your account usage, spend, and recent activity for this workspace.'}
-      </p>
+      {ws ? <div className="mb-3 text-sm text-gray-500">{ws.name}</div> : null}
 
       {!ctx ? (
-        <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-          Not connected to a database yet. Set <code className="font-mono">DATABASE_URL</code>, then run{' '}
-          <code className="font-mono">pnpm db:push</code>, <code className="font-mono">pnpm db:sync-catalog</code>, and{' '}
-          <code className="font-mono">pnpm db:seed</code>.
-        </div>
+        <>
+          <h1 className="text-2xl font-semibold text-gray-900">Overview</h1>
+          <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            Not connected to a database yet. Set <code className="font-mono">DATABASE_URL</code>, then run{' '}
+            <code className="font-mono">pnpm db:push</code>, <code className="font-mono">pnpm db:sync-catalog</code>, and{' '}
+            <code className="font-mono">pnpm db:seed</code>.
+          </div>
+        </>
       ) : null}
 
-      {savings ? (
-        <div className="mt-8">
-          <SavingsPanel data={savings} />
-        </div>
-      ) : null}
+      {finops ? <FinOpsDashboard data={finops} /> : null}
 
-      <div className="mt-8 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-gray-900">This Week&apos;s Usage</h2>
-        <Link href="/activity" className="text-sm text-gray-500 hover:text-gray-900">
-          View Activity ›
-        </Link>
+      <div className="mt-10 mb-3">
+        <h2 className="text-sm font-semibold tracking-wide text-gray-900 uppercase">Manage workspace</h2>
       </div>
-      <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-3">
-        <UsageCard title="Spend" value={formatUsd(usage.spendUsd)} model={top?.modelSlug} metric={top ? formatUsd(top.spendUsd) : undefined} />
-        <UsageCard title="Requests" value={usage.requests.toLocaleString()} model={top?.modelSlug} metric={top ? top.requests.toLocaleString() : undefined} />
-        <UsageCard title="Tokens" value={usage.tokens.toLocaleString()} model={top?.modelSlug} metric={top ? top.tokens.toLocaleString() : undefined} />
-      </div>
-
-      <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
         {FEATURES.map((f) => {
           const Icon = f.icon;
           return (

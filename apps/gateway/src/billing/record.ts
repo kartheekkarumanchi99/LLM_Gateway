@@ -16,6 +16,8 @@ export interface RecordParams {
   completionPricePerM: string;
   latencyMs: number;
   byok?: boolean;
+  cached?: boolean;
+  overrideCostUsd?: number;
   appName?: string | null;
   cachedTokens?: number;
   reasoningTokens?: number;
@@ -32,8 +34,10 @@ export interface RecordParams {
  */
 export async function recordUsage(p: RecordParams): Promise<number> {
   const cost =
-    (p.promptTokens / 1_000_000) * Number(p.promptPricePerM) +
-    (p.completionTokens / 1_000_000) * Number(p.completionPricePerM);
+    p.overrideCostUsd != null
+      ? p.overrideCostUsd
+      : (p.promptTokens / 1_000_000) * Number(p.promptPricePerM) +
+        (p.completionTokens / 1_000_000) * Number(p.completionPricePerM);
   const costStr = cost.toFixed(10);
 
   try {
@@ -55,6 +59,7 @@ export async function recordUsage(p: RecordParams): Promise<number> {
           costUsd: costStr,
           latencyMs: p.latencyMs,
           byok: p.byok ?? false,
+          cached: p.cached ?? false,
           appName: p.appName ?? null,
           cachedTokens: p.cachedTokens ?? 0,
           reasoningTokens: p.reasoningTokens ?? 0,
