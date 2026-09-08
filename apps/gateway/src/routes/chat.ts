@@ -8,7 +8,7 @@ import { resolveModel, type ResolvedModel } from '../routing/resolve';
 import { autoRoute } from '../routing/auto';
 import { classifyTask } from '../routing/classify';
 import { isCostTier, type CandidateModel, type CostTier, type RoutingTrace } from '../routing/types';
-import { getRoutingConfig, getToolsConfig } from '../routing/config';
+import { getPredictiveConfig, getRoutingConfig, getToolsConfig } from '../routing/config';
 import { resolvePreset } from '../routing/presets';
 import { getObservabilityConfig } from '../observability/config';
 import { emitObservability } from '../observability/emit';
@@ -16,6 +16,9 @@ import { runClassifiersForRequest } from '../classifiers/run';
 import { maybeLowBalanceAlert } from '../notifications/alerts';
 import { runOrchestration } from '../orchestration/run';
 import { lookupCache, storeCache } from '../cache/semantic';
+import { predict, warmPredictorStats, type Prediction } from '../routing/predict';
+import { recordPredictiveEvent } from '../routing/predict-record';
+import { runSpeculativeAuto } from '../routing/speculate';
 import type { PresetParameters } from '@llmgw/db';
 import { recordUsage } from '../billing/record';
 import { keyUsageUsd, getWorkspaceBudget, workspaceUsageUsd } from '../billing/usage';
@@ -88,6 +91,7 @@ export function registerChat(app: FastifyInstance): void {
 
     // Guardrail: load once; budget + content are per-key (checked once). Model
     // access is re-checked per candidate inside the recovery loop.
+    let sensitiveFlagged = false;
     const guardrail = await getGuardrailForKey(auth.apiKeyId, auth.workspaceId);
     if (guardrail) {
       if (guardrail.budget?.limitUsd) {
@@ -99,6 +103,7 @@ export function registerChat(app: FastifyInstance): void {
         }
       }
       const content = checkContent(guardrail, body.messages);
+      if (content.flags.length > 0) sensitiveFlagged = true;
       if (content.block) {
         return reply
           .code(400)
@@ -121,6 +126,7 @@ export function registerChat(app: FastifyInstance): void {
     const routingConfig = await getRoutingConfig(auth.workspaceId);
     const toolsConfig = await getToolsConfig(auth.workspaceId);
     const obsConfig = await getObservabilityConfig(auth.workspaceId);
+    const predictiveConfig = await getPredictiveConfig(auth.workspaceId);
 
     // ---- Preset resolution (model = "@preset/<slug>") ----
     let messages = body.messages;
@@ -178,6 +184,40 @@ export function registerChat(app: FastifyInstance): void {
     const maxTokens = Number((body as { max_tokens?: number }).max_tokens ?? 512);
     const taskClass = classifyTask(messages);
     const trace: RoutingTrace = { mode: 'explicit', taskClass, costTier, attempts: [] };
+
+    // ---- Predictive-routing controls (additive; standard mode is unchanged) ----
+    const bx = body as {
+      routing_mode?: unknown;
+      speculation?: unknown;
+      speculation_budget_usd?: unknown;
+      max_routing_overhead_ms?: unknown;
+    };
+    const routingMode =
+      bx.routing_mode === 'standard' ? 'standard' : bx.routing_mode === 'predictive' ? 'predictive' : 'auto';
+    const speculationOptedOut = bx.speculation === 'off';
+    const speculationBudgetUsd =
+      typeof bx.speculation_budget_usd === 'number' ? bx.speculation_budget_usd : null;
+    const maxRoutingOverheadMs =
+      typeof bx.max_routing_overhead_ms === 'number' ? bx.max_routing_overhead_ms : 0;
+    const explicitListEarly =
+      presetModels ?? (Array.isArray(body.models) && body.models.length > 0 ? body.models : null);
+    const wantsAutoEarly =
+      !explicitListEarly && typeof body.model === 'string' && AUTO_SLUGS.has(body.model);
+    const predictiveActive =
+      (process.env.PREDICTIVE_ROUTING_KILL ?? '') !== '1' &&
+      predictiveConfig.enabled &&
+      wantsAutoEarly &&
+      routingMode !== 'standard';
+    let prediction: Prediction | null = null;
+    if (predictiveActive) {
+      warmPredictorStats(auth.workspaceId);
+      prediction = predict({
+        workspaceId: auth.workspaceId,
+        messages,
+        hasTools: Array.isArray(body.tools) && body.tools.length > 0,
+        fallbackModel: routingConfig.defaultModel,
+      });
+    }
 
     // ---- Semantic response cache: an exact/semantic hit short-circuits routing
     // at ~zero upstream cost (the biggest model-agnostic cost lever) ----
@@ -305,6 +345,66 @@ export function registerChat(app: FastifyInstance): void {
       });
     }
 
+    // ---- Speculative execution: overlap the predicted upstream call with routing,
+    // then commit to exactly one winner before any client-visible byte ----
+    if (
+      prediction &&
+      predictiveConfig.speculationEnabled &&
+      !predictiveConfig.observationOnly &&
+      !body.stream &&
+      !(predictiveConfig.orchestrationDisabled && orchestrateRaw != null) &&
+      !(predictiveConfig.sensitiveDataDisabled && sensitiveFlagged)
+    ) {
+      const effConfig =
+        maxRoutingOverheadMs > 0
+          ? { ...predictiveConfig, commitTimeoutMs: Math.min(predictiveConfig.commitTimeoutMs, maxRoutingOverheadMs) }
+          : predictiveConfig;
+      const spec = await runSpeculativeAuto(messages, body, {
+        orgId: auth.orgId,
+        workspaceId: auth.workspaceId,
+        apiKeyId: auth.apiKeyId,
+        requestId,
+        appName,
+        taskClass,
+        costTier,
+        maxTokens,
+        guardrail,
+        allowedModels: routingConfig.autoAllowedModels,
+        config: effConfig,
+        prediction,
+        startedAt: started,
+        speculationBudgetUsd,
+        speculationOptedOut,
+      });
+      if (spec) {
+        for (const [k, v] of Object.entries(spec.headers)) reply.header(k, v);
+        void emitObservability({
+          config: obsConfig,
+          workspaceId: auth.workspaceId,
+          apiKeyId: auth.apiKeyId,
+          requestId,
+          modelSlug: spec.chosenModel,
+          providerSlug: spec.providerSlug,
+          taskClass,
+          messages,
+          completion: spec.completionText,
+          promptTokens: spec.usage.promptTokens,
+          completionTokens: spec.usage.completionTokens,
+          costUsd: spec.cost,
+          latencyMs: Date.now() - started,
+        });
+        void runClassifiersForRequest({
+          workspaceId: auth.workspaceId,
+          orgId: auth.orgId,
+          requestId,
+          messages,
+          completion: spec.completionText,
+        });
+        void maybeLowBalanceAlert(auth.orgId, auth.workspaceId);
+        return reply.send(spec.responseJson);
+      }
+    }
+
     // ---- Model routing: build the ordered candidate list ----
     const candidates: CandidateModel[] = [];
     const seen = new Set<string>();
@@ -384,6 +484,7 @@ export function registerChat(app: FastifyInstance): void {
     }
 
     // ---- Recovery loop: try candidates in order until one succeeds ----
+    const preUpstreamMs = Date.now() - started;
     let lastErr: (Error & { status?: number }) | null = null;
     for (const cand of candidates) {
       const adapter = getAdapter(cand.providerSlug);
@@ -500,6 +601,28 @@ export function registerChat(app: FastifyInstance): void {
           completion: '',
         });
         void maybeLowBalanceAlert(auth.orgId, auth.workspaceId);
+        if (prediction) {
+          void recordPredictiveEvent({
+            requestId,
+            workspaceId: auth.workspaceId,
+            predictorVersion: prediction.predictorVersion,
+            mode: 'observation',
+            predictedTaskClass: prediction.predictedTaskClass,
+            actualTaskClass: taskClass,
+            predictedModel: prediction.predictedModel,
+            authoritativeModel: cand.slug,
+            committedModel: cand.slug,
+            predictionConfidence: prediction.confidence,
+            predictionCorrect: prediction.predictedModel === cand.slug,
+            speculationStarted: false,
+            loserCancelled: false,
+            commitReason: 'observation',
+            routingOverheadMs: preUpstreamMs,
+            estimatedStandardOverheadMs: null,
+            predictorLatencyMs: prediction.predictorLatencyMs,
+            speculationWasteUsd: 0,
+          });
+        }
         return reply;
       }
 
@@ -552,6 +675,28 @@ export function registerChat(app: FastifyInstance): void {
           completion: completionText,
         });
         void maybeLowBalanceAlert(auth.orgId, auth.workspaceId);
+        if (prediction) {
+          void recordPredictiveEvent({
+            requestId,
+            workspaceId: auth.workspaceId,
+            predictorVersion: prediction.predictorVersion,
+            mode: 'observation',
+            predictedTaskClass: prediction.predictedTaskClass,
+            actualTaskClass: taskClass,
+            predictedModel: prediction.predictedModel,
+            authoritativeModel: cand.slug,
+            committedModel: cand.slug,
+            predictionConfidence: prediction.confidence,
+            predictionCorrect: prediction.predictedModel === cand.slug,
+            speculationStarted: false,
+            loserCancelled: false,
+            commitReason: 'observation',
+            routingOverheadMs: preUpstreamMs,
+            estimatedStandardOverheadMs: null,
+            predictorLatencyMs: prediction.predictorLatencyMs,
+            speculationWasteUsd: 0,
+          });
+        }
         if (cacheEnabled) {
           void storeCache({
             workspaceId: auth.workspaceId,
@@ -576,6 +721,14 @@ export function registerChat(app: FastifyInstance): void {
             chosen: cand.slug,
             provider: cand.providerSlug,
             attempts: trace.attempts.length,
+            ...(prediction
+              ? {
+                  prediction: prediction.predictedModel,
+                  predictionConfidence: Number(prediction.confidence.toFixed(4)),
+                  predictionCorrect: prediction.predictedModel === cand.slug,
+                  speculationStarted: false,
+                }
+              : {}),
           },
         };
         return reply.send(enriched);

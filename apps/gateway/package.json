@@ -7,7 +7,7 @@
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
     "build": "tsup",
-    "test": "node --import tsx --test src/routing/score.test.ts"
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

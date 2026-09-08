@@ -21,6 +21,7 @@ import {
   SlidersHorizontal,
   Tag,
   Wrench,
+  Zap,
   type LucideIcon,
 } from 'lucide-react';
 import { UserMenu } from '@/components/user-menu';
@@ -39,6 +40,7 @@ const HOME: NavItem[] = [
   { label: 'Guardrails', href: '/guardrails', icon: ShieldCheck },
   { label: 'BYOK', href: '/byok', icon: KeySquare },
   { label: 'Routing', href: '/routing', icon: Route },
+  { label: 'Predictive', href: '/predictive', icon: Zap, badge: 'Beta' },
   { label: 'Presets', href: '/presets', icon: SlidersHorizontal },
   { label: 'Tools', href: '/tools', icon: Wrench },
   { label: 'Observability', href: '/observability', icon: Eye },

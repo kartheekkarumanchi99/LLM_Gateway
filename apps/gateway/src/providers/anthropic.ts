@@ -45,7 +45,7 @@ function toAnthropicPayload(body: ChatCompletionRequest, upstreamModel: string) 
 export const anthropicAdapter: ProviderAdapter = {
   slug: 'anthropic',
 
-  async chat(upstreamModel, body, apiKey) {
+  async chat(upstreamModel, body, apiKey, signal) {
     const res = await fetch(`${config.anthropicBaseUrl}/messages`, {
       method: 'POST',
       headers: {
@@ -54,6 +54,7 @@ export const anthropicAdapter: ProviderAdapter = {
         'anthropic-version': ANTHROPIC_VERSION,
       },
       body: JSON.stringify(toAnthropicPayload(body, upstreamModel)),
+      signal,
     });
 
     const data = (await res.json()) as Record<string, any>;

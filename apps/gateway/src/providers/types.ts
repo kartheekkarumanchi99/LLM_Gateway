@@ -26,6 +26,7 @@ export interface ProviderAdapter {
     upstreamModel: string,
     body: ChatCompletionRequest,
     apiKey: string,
+    signal?: AbortSignal,
   ): Promise<{ json: Record<string, unknown>; usage: Usage }>;
   /**
    * Streaming completion. Returns a byte stream of OpenAI-compatible SSE and

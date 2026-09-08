@@ -4,7 +4,7 @@ import type { ChatCompletionRequest, ProviderAdapter, Usage } from './types';
 export const openaiAdapter: ProviderAdapter = {
   slug: 'openai',
 
-  async chat(upstreamModel, body, apiKey) {
+  async chat(upstreamModel, body, apiKey, signal) {
     const res = await fetch(`${config.openaiBaseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -12,6 +12,7 @@ export const openaiAdapter: ProviderAdapter = {
         authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({ ...body, model: upstreamModel, stream: false }),
+      signal,
     });
 
     const json = (await res.json()) as Record<string, any>;

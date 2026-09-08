@@ -171,6 +171,7 @@ export const workspaceSettings = pgTable('workspace_settings', {
   routing: jsonb('routing'),
   tools: jsonb('tools'),
   observability: jsonb('observability'),
+  predictive: jsonb('predictive'),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -318,6 +319,42 @@ export const responseCache = pgTable(
   (t) => ({
     wsHashIdx: index('response_cache_ws_hash_idx').on(t.workspaceId, t.promptHash),
     wsTaskIdx: index('response_cache_ws_task_idx').on(t.workspaceId, t.taskClass),
+  }),
+);
+
+// Predictive-routing / speculative-execution telemetry: one row per request that
+// ran the predictor (observation-only or active speculation). Extends the routing
+// trace rather than replacing it.
+export const predictiveRoutingEvents = pgTable(
+  'predictive_routing_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    requestId: text('request_id').notNull(),
+    workspaceId: uuid('workspace_id').references(() => workspaces.id, { onDelete: 'set null' }),
+    predictorVersion: text('predictor_version').notNull(),
+    mode: text('mode'), // 'observation' | 'speculation'
+    predictedTaskClass: text('predicted_task_class'),
+    actualTaskClass: text('actual_task_class'),
+    predictedModel: text('predicted_model'),
+    authoritativeModel: text('authoritative_model'),
+    committedModel: text('committed_model'),
+    predictionConfidence: numeric('prediction_confidence', { precision: 5, scale: 4 }),
+    predictionCorrect: boolean('prediction_correct'),
+    speculationStarted: boolean('speculation_started').notNull().default(false),
+    loserCancelled: boolean('loser_cancelled').notNull().default(false),
+    commitReason: text('commit_reason'),
+    routingOverheadMs: integer('routing_overhead_ms'),
+    estimatedStandardOverheadMs: integer('estimated_standard_overhead_ms'),
+    predictorLatencyMs: integer('predictor_latency_ms'),
+    speculationWasteUsd: numeric('speculation_waste_usd', { precision: 20, scale: 10 })
+      .notNull()
+      .default('0'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    wsIdx: index('pred_events_ws_idx').on(t.workspaceId, t.createdAt),
+    correctIdx: index('pred_events_correct_idx').on(t.predictionCorrect),
+    versionIdx: index('pred_events_version_idx').on(t.predictorVersion),
   }),
 );
 

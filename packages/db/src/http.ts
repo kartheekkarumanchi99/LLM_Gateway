@@ -24,6 +24,7 @@ export * from './crypto';
 export * from './auth';
 export * from './policies';
 export * from './routing-config';
+export * from './predictive-config';
 export * from './observability';
 export * from './classifiers-config';
 
