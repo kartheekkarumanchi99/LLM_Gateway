@@ -132,6 +132,7 @@ export async function playgroundChat(opts: {
             outcome: str(o.outcome),
             displayOrder: typeof o.displayOrder === 'number' ? o.displayOrder : null,
             temperature: typeof o.temperature === 'number' ? o.temperature : null,
+            note: str(o.note),
           };
         })
       : undefined;

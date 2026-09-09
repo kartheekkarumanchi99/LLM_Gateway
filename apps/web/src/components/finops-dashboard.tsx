@@ -234,7 +234,7 @@ export function FinOpsDashboard({ data }: { data: FinOpsData }) {
           </table>
         </div>
         <p className="mt-2 text-xs text-gray-400">
-          Est. quality Δ for Critique/Best-of-N is a modeled estimate; acceptance, escalation, branch count and judge
+          Est. quality Δ for Critique/Best-of-N/Decompose is a modeled estimate; acceptance, escalation, branch count, subtasks and judge
           rate are measured from recorded legs.
         </p>
       </Section>
@@ -426,6 +426,7 @@ function WorkflowSignals({ w }: { w: WorkflowStat }) {
   if (w.acceptanceRatePct != null) chips.push(`accept ${pct0(w.acceptanceRatePct)}`);
   if (w.escalationRatePct != null) chips.push(`escalate ${pct0(w.escalationRatePct)}`);
   if (w.avgBranchCount != null) chips.push(`${w.avgBranchCount.toFixed(1)} branches`);
+  if (w.subtaskAvg != null) chips.push(`${w.subtaskAvg.toFixed(1)} subtasks`);
   if (w.judgeSelectionRatePct != null) chips.push(`judged ${pct0(w.judgeSelectionRatePct)}`);
   if (w.estQualityDelta != null && w.estQualityDelta > 0) chips.push(`est. +${w.estQualityDelta} quality`);
   if (chips.length === 0) return <span className="text-xs text-gray-400">—</span>;

@@ -12,6 +12,7 @@ export interface ChatLeg {
   outcome?: string | null;
   displayOrder?: number | null;
   temperature?: number | null;
+  note?: string | null;
 }
 
 export interface ChatMeta {

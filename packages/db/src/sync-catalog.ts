@@ -14,9 +14,10 @@ for (const rel of ['.env', '../.env', '../../.env']) {
 
 import { sql } from 'drizzle-orm';
 import { getDb, models, providers } from './index';
+import { SUPPORTED_PROVIDER_SLUGS } from './providers-catalog';
 
-// Model authors this gateway can actually execute (adapters + credentials exist).
-const EXECUTABLE_AUTHORS = new Set(['openai', 'anthropic']);
+// Model authors this gateway can execute (an adapter + base URL exist for them).
+const EXECUTABLE_AUTHORS = new Set(SUPPORTED_PROVIDER_SLUGS);
 
 interface ORModel {
   id: string;

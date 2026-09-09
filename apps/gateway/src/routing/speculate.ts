@@ -41,6 +41,7 @@ export interface SpecCtx {
   startedAt: number;
   speculationBudgetUsd: number | null;
   speculationOptedOut: boolean;
+  keyedProviders?: Set<string>;
 }
 
 export interface SpecResult {
@@ -185,6 +186,7 @@ export async function runSpeculativeAuto(
       maxTokens: ctx.maxTokens,
       guardrail: ctx.guardrail,
       allowedModels: ctx.allowedModels,
+      keyedProviders: ctx.keyedProviders,
     }),
     ctx.config.commitTimeoutMs,
   );

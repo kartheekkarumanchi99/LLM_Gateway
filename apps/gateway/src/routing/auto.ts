@@ -1,5 +1,7 @@
 import { matchesAnyPattern, type GuardrailPolicies } from '@llmgw/db';
 import { checkModelAccess } from '../guardrails/enforce';
+import { hasPlatformKey } from '../providers/keys';
+import { hasAdapter } from '../providers/registry';
 import type { ChatMessage } from '../providers/types';
 import { approxPromptTokens, classifyTask } from './classify';
 import { getExecutableModels, getOwnSignal, getPriorSignal } from './data';
@@ -20,6 +22,7 @@ export async function autoRoute(opts: {
   maxTokens: number;
   guardrail: GuardrailPolicies | null;
   allowedModels: string[];
+  keyedProviders?: Set<string>;
 }): Promise<AutoRouteResult> {
   const taskClass = classifyTask(opts.messages);
   const estPromptTokens = approxPromptTokens(opts.messages);
@@ -33,6 +36,14 @@ export async function autoRoute(opts: {
   }
   // Workspace allowed-model patterns (empty list = allow all).
   pool = pool.filter((m) => matchesAnyPattern(m.slug, opts.allowedModels));
+  // Provider must have an adapter AND a usable key: the org-scoped keyed set when the
+  // caller supplies it (env keys + BYOK), else global platform keys. This is what makes
+  // a newly-added key light up its provider's models with no code change.
+  pool = pool.filter(
+    (m) =>
+      hasAdapter(m.providerSlug) &&
+      (opts.keyedProviders ? opts.keyedProviders.has(m.providerSlug) : hasPlatformKey(m.providerSlug)),
+  );
   if (pool.length === 0) {
     return { taskClass, ranked: [], alpha: 0, ownRequests: 0 };
   }

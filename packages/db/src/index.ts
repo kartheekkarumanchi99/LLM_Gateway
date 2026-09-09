@@ -18,6 +18,7 @@ export * from './routing-config';
 export * from './predictive-config';
 export * from './observability';
 export * from './classifiers-config';
+export * from './providers-catalog';
 
 let pool: Pool | undefined;
 let dbInstance: NodePgDatabase<typeof schema> | undefined;

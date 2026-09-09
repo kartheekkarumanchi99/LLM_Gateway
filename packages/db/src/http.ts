@@ -1,6 +1,9 @@
 import { setDefaultResultOrder } from 'node:dns';
-// Neon dual-stack: avoid IPv6 black-hole on some networks.
+import { setDefaultAutoSelectFamily } from 'node:net';
+// Neon resolves dual-stack; IPv6 is black-holed on some networks. Force IPv4 and
+// disable Happy Eyeballs so undici's fetch can't race (and hang on) a dead IPv6 route.
 setDefaultResultOrder('ipv4first');
+setDefaultAutoSelectFamily(false);
 
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -27,6 +30,7 @@ export * from './routing-config';
 export * from './predictive-config';
 export * from './observability';
 export * from './classifiers-config';
+export * from './providers-catalog';
 
 let httpDb: NeonHttpDatabase<typeof schema> | undefined;
 

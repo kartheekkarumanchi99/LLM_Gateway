@@ -18,7 +18,7 @@ export interface AttributionSource {
 }
 
 export interface WorkflowStat {
-  key: 'single' | 'cascade' | 'critique' | 'bestofn';
+  key: 'single' | 'cascade' | 'critique' | 'bestofn' | 'decompose';
   label: string;
   requests: number;
   avgCostUsd: number;
@@ -32,6 +32,7 @@ export interface WorkflowStat {
   avgBranchCount?: number | null;
   judgeSelectionRatePct?: number | null;
   revisionImprovementRatePct?: number | null;
+  subtaskAvg?: number | null;
 }
 
 export interface CacheAnalytics {

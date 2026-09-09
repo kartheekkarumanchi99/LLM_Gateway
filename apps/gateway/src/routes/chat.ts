@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { authenticate } from '../auth';
 import { getAdapter } from '../providers/registry';
-import { resolveProviderKey } from '../providers/keys';
+import { getKeyedProviders, resolveProviderKey } from '../providers/keys';
 import type { ChatCompletionRequest, Usage } from '../providers/types';
 import { resolveModel, type ResolvedModel } from '../routing/resolve';
 import { autoRoute } from '../routing/auto';
@@ -273,11 +273,18 @@ export function registerChat(app: FastifyInstance): void {
       }
     }
 
+    // Providers with a usable key for this org (env platform keys + BYOK) — routing is
+    // gated to these so a newly-added key immediately lights up its models.
+    const keyedProviders = await getKeyedProviders(auth.orgId);
+
     // ---- Compound orchestration (HydraFusion-style): draft -> gate/critique -> escalate/revise ----
     const orchestrateRaw = (body as { orchestrate?: unknown }).orchestrate;
     if (
       !body.stream &&
-      (orchestrateRaw === 'cascade' || orchestrateRaw === 'critique' || orchestrateRaw === 'bestofn')
+      (orchestrateRaw === 'cascade' ||
+        orchestrateRaw === 'critique' ||
+        orchestrateRaw === 'bestofn' ||
+        orchestrateRaw === 'decompose')
     ) {
       const result = await runOrchestration({
         pattern: orchestrateRaw,
@@ -291,6 +298,7 @@ export function registerChat(app: FastifyInstance): void {
           guardrail,
           allowedModels: routingConfig.autoAllowedModels,
           maxTokens,
+          keyedProviders,
         },
       });
       if (result.error && !result.content) {
@@ -370,6 +378,7 @@ export function registerChat(app: FastifyInstance): void {
         maxTokens,
         guardrail,
         allowedModels: routingConfig.autoAllowedModels,
+        keyedProviders,
         config: effConfig,
         prediction,
         startedAt: started,
@@ -436,6 +445,7 @@ export function registerChat(app: FastifyInstance): void {
         maxTokens,
         guardrail,
         allowedModels: routingConfig.autoAllowedModels,
+        keyedProviders,
       });
       trace.signalMix = { alpha: routed.alpha, ownRequests: routed.ownRequests };
       for (const r of routed.ranked) {

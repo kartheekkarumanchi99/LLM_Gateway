@@ -15,7 +15,7 @@ interface Item {
   error?: boolean;
 }
 
-type OrchestrationMode = 'single' | 'cascade' | 'critique' | 'bestofn';
+type OrchestrationMode = 'single' | 'cascade' | 'critique' | 'bestofn' | 'decompose';
 
 const COST_TIERS = ['low', 'medium', 'high', 'max'];
 
@@ -103,12 +103,13 @@ export function ChatView({ models }: { models: RunnableModel[] }) {
             value={mode}
             onChange={(e) => setMode(e.target.value as OrchestrationMode)}
             className="appearance-none rounded-lg border border-gray-300 bg-white py-1.5 pl-3 pr-8 text-sm text-gray-700 outline-none focus:border-violet-500"
-            title="Workflow: Single routes to one model; Cascade drafts cheap then escalates on a quality gate; Critique drafts, reviews, and revises; Best-of-N runs several cheap models in parallel and a judge picks the winner."
+            title="Workflow: Single routes to one model; Cascade drafts cheap then escalates on a quality gate; Critique drafts, reviews, and revises; Best-of-N runs several cheap models in parallel and a judge picks the winner; Decompose splits the task into subtasks, routes each to a specialist model in parallel, then composes the answer."
           >
             <option value="single">Single</option>
             <option value="cascade">Cascade</option>
             <option value="critique">Critique</option>
             <option value="bestofn">Best-of-N</option>
+            <option value="decompose">Decompose</option>
           </select>
           <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
         </div>
@@ -296,26 +297,31 @@ function AssistantMessage({ item }: { item: Item }) {
                     </div>
                     <div className="space-y-1">
                       {meta.legs.map((l, i) => (
-                        <div key={i} className="flex items-center justify-between gap-2">
-                          <span className="w-16 shrink-0 truncate text-gray-400">
-                            {l.role}
-                            {l.displayOrder != null ? ` \u00b7 #${l.displayOrder}` : ''}
-                          </span>
-                          <span className="flex-1 truncate font-mono text-gray-700">{l.model}</span>
-                          {l.outcome && l.outcome !== 'ok' ? (
-                            <span
-                              className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${
-                                l.outcome === 'selected' || l.outcome === 'accepted'
-                                  ? 'bg-emerald-50 text-emerald-600'
-                                  : l.outcome === 'rejected'
-                                    ? 'bg-amber-50 text-amber-600'
-                                    : 'bg-gray-100 text-gray-500'
-                              }`}
-                            >
-                              {l.outcome}
+                        <div key={i} className="space-y-0.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="w-16 shrink-0 truncate text-gray-400">
+                              {l.role}
+                              {l.displayOrder != null ? ` \u00b7 #${l.displayOrder}` : ''}
                             </span>
+                            <span className="flex-1 truncate font-mono text-gray-700">{l.model || '\u2014'}</span>
+                            {l.outcome && l.outcome !== 'ok' ? (
+                              <span
+                                className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${
+                                  l.outcome === 'selected' || l.outcome === 'accepted' || l.outcome === 'composed'
+                                    ? 'bg-emerald-50 text-emerald-600'
+                                    : l.outcome === 'rejected' || l.outcome === 'failed'
+                                      ? 'bg-amber-50 text-amber-600'
+                                      : 'bg-gray-100 text-gray-500'
+                                }`}
+                              >
+                                {l.outcome}
+                              </span>
+                            ) : null}
+                            <span className="w-14 shrink-0 text-right text-gray-400">{fmtCost(l.costUsd)}</span>
+                          </div>
+                          {l.note ? (
+                            <div className="truncate pl-16 text-[11px] text-gray-400">{l.note}</div>
                           ) : null}
-                          <span className="w-14 shrink-0 text-right text-gray-400">{fmtCost(l.costUsd)}</span>
                         </div>
                       ))}
                     </div>

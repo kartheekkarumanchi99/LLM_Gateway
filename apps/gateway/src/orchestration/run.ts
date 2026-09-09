@@ -2,8 +2,9 @@ import { recordUsage } from '../billing/record';
 import { resolveProviderKey } from '../providers/keys';
 import { getAdapter } from '../providers/registry';
 import type { ChatCompletionRequest, ChatMessage } from '../providers/types';
+import { classifyTask } from '../routing/classify';
 import { autoRoute } from '../routing/auto';
-import type { RankedCandidate } from '../routing/types';
+import type { CostTier, RankedCandidate } from '../routing/types';
 import type { GuardrailPolicies } from '@llmgw/db';
 
 // HydraFusion-style compound workflows on top of the single-model router.
@@ -11,7 +12,7 @@ import type { GuardrailPolicies } from '@llmgw/db';
 // - critique: a model drafts, an independent critic reviews, the drafter revises once.
 // Every leg is metered individually ("complete accounting").
 
-export type OrchestrationPattern = 'cascade' | 'critique' | 'bestofn';
+export type OrchestrationPattern = 'cascade' | 'critique' | 'bestofn' | 'decompose';
 
 export interface OrchestrationCtx {
   orgId: string;
@@ -22,6 +23,7 @@ export interface OrchestrationCtx {
   guardrail: GuardrailPolicies | null;
   allowedModels: string[];
   maxTokens: number;
+  keyedProviders?: Set<string>;
 }
 
 export interface OrchestrationLeg {
@@ -35,6 +37,7 @@ export interface OrchestrationLeg {
   outcome: string;
   temperature?: number;
   displayOrder?: number; // slot this candidate occupied when shown to the judge
+  note?: string; // human label (e.g. subtask title / plan summary) for decompose legs
 }
 
 export interface OrchestrationResult {
@@ -271,6 +274,7 @@ async function pickModels(
       maxTokens: ctx.maxTokens,
       guardrail: ctx.guardrail,
       allowedModels: ctx.allowedModels,
+      keyedProviders: ctx.keyedProviders,
     }),
     autoRoute({
       messages,
@@ -278,6 +282,7 @@ async function pickModels(
       maxTokens: ctx.maxTokens,
       guardrail: ctx.guardrail,
       allowedModels: ctx.allowedModels,
+      keyedProviders: ctx.keyedProviders,
     }),
   ]);
   const cheapChain = low.ranked.slice(0, LEG_FALLBACK_CAP);
@@ -503,6 +508,244 @@ async function runBestOfN(
   };
 }
 
+// ---- Task decomposition ----------------------------------------------------
+// A planner splits the task -> specialist models solve subtasks (each routed at a
+// complexity-based cost tier, in dependency waves that run in parallel) -> a strong
+// composer merges the results. Every leg is metered individually, and the pattern
+// degrades to a single strong answer when no plan can be formed or every subtask
+// fails, so it never does worse than the single-model path.
+const MAX_SUBTASKS = 6; // cap planner output -> bounds cost + latency
+const MAX_DEP_LEVELS = 3; // cap dependency depth so waves stay shallow
+const SUBTASK_MAX_TOKENS = 1024; // keep subtasks concise
+const DEP_CONTEXT_CHARS = 1500; // truncate injected dependency output
+
+const PLANNER_SYSTEM =
+  'You are a planning module. Break the user\'s task into 2-6 independent, concretely-scoped subtasks that can be solved separately and then merged. Prefer FEWER subtasks for simple tasks. Give each subtask a complexity of "low", "medium", or "high" reflecting how much reasoning it needs (low = lookup/formatting, high = deep reasoning or coding). Use "depends_on" ONLY when a subtask genuinely needs an earlier subtask\'s output (reference earlier ids). Reply with ONLY JSON, no prose: {"subtasks":[{"id":1,"title":"short label","prompt":"a self-contained instruction","complexity":"low|medium|high","depends_on":[]}],"compose":"how to merge the results"}.';
+
+const SUBTASK_SYSTEM =
+  'You are solving ONE focused subtask that is part of a larger task. Answer only this subtask, precisely and concisely. Do not restate the overall task or add meta commentary.';
+
+const COMPOSER_SYSTEM =
+  'You are the composer. Merge the subtask results into one coherent, complete answer to the original task. Resolve overlaps and contradictions, keep it well-structured, and do not mention the decomposition, the subtasks, or this process.';
+
+type Complexity = 'low' | 'medium' | 'high';
+
+interface PlanSubtask {
+  id: number;
+  title: string;
+  prompt: string;
+  complexity: Complexity;
+  dependsOn: number[];
+}
+
+function tierForComplexity(c: Complexity): CostTier {
+  return c; // 'low' | 'medium' | 'high' are all valid cost tiers
+}
+
+// Hardened plan parser: pulls the JSON object out of the planner reply and
+// normalizes it. depends_on may only reference EARLIER ids, which guarantees a
+// DAG (no cycles / forward refs). Returns null when there aren't >=2 usable subtasks.
+function parsePlan(text: string, cap: number): { subtasks: PlanSubtask[]; compose: string | null } | null {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  let obj: unknown;
+  try {
+    obj = JSON.parse(text.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+  const raw = (obj as { subtasks?: unknown })?.subtasks;
+  if (!Array.isArray(raw)) return null;
+  const seen = new Set<number>();
+  const subtasks: PlanSubtask[] = [];
+  for (const item of raw) {
+    if (subtasks.length >= cap) break;
+    const r = (item ?? {}) as Record<string, unknown>;
+    const id = Number(r.id);
+    if (!Number.isInteger(id) || seen.has(id)) continue;
+    const rawTitle = typeof r.title === 'string' ? r.title.trim() : '';
+    const title = (rawTitle || `Subtask ${id}`).slice(0, 80);
+    const rawPrompt = typeof r.prompt === 'string' ? r.prompt.trim() : '';
+    const prompt = rawPrompt || title;
+    const cLower = typeof r.complexity === 'string' ? r.complexity.toLowerCase() : '';
+    const complexity: Complexity = cLower === 'low' || cLower === 'high' ? cLower : 'medium';
+    const dependsOn = Array.isArray(r.depends_on)
+      ? (r.depends_on as unknown[]).map(Number).filter((d) => Number.isInteger(d) && seen.has(d))
+      : [];
+    seen.add(id);
+    subtasks.push({ id, title, prompt, complexity, dependsOn });
+  }
+  if (subtasks.length < 2) return null;
+  const composeRaw = (obj as { compose?: unknown })?.compose;
+  const compose = typeof composeRaw === 'string' && composeRaw.trim() ? composeRaw.trim() : null;
+  return { subtasks, compose };
+}
+
+// Group subtasks into dependency waves (level 0 = no deps). Because deps only point
+// at earlier ids, a single forward pass computes stable levels.
+function planWaves(subtasks: PlanSubtask[]): PlanSubtask[][] {
+  const levelOf = new Map<number, number>();
+  for (const s of subtasks) {
+    const lvl =
+      s.dependsOn.length === 0
+        ? 0
+        : Math.min(MAX_DEP_LEVELS, 1 + Math.max(...s.dependsOn.map((d) => levelOf.get(d) ?? 0)));
+    levelOf.set(s.id, lvl);
+  }
+  const waves: PlanSubtask[][] = [];
+  for (const s of subtasks) {
+    const lvl = levelOf.get(s.id) ?? 0;
+    (waves[lvl] ??= []).push(s);
+  }
+  return waves.filter((w) => w && w.length > 0);
+}
+
+async function runDecompose(
+  ctx: OrchestrationCtx,
+  messages: ChatMessage[],
+  cheapChain: LegModel[],
+  strongChain: LegModel[],
+  taskClass: string,
+): Promise<OrchestrationResult> {
+  const legs: OrchestrationLeg[] = [];
+  const strongOrCheap = strongChain.length ? strongChain : cheapChain;
+
+  // Route each leg at a target cost tier, classifying on that leg's own content so a
+  // coding subtask reaches a coding-capable model. Memoized by (tier, class) to avoid
+  // duplicate catalog/signal reads across same-kind subtasks.
+  const routeCache = new Map<string, LegModel[]>();
+  async function routeAtTier(msgs: ChatMessage[], tier: CostTier): Promise<LegModel[]> {
+    const key = `${tier}:${classifyTask(msgs)}`;
+    const cached = routeCache.get(key);
+    if (cached) return cached;
+    const r = await autoRoute({
+      messages: msgs,
+      costTier: tier,
+      maxTokens: ctx.maxTokens,
+      guardrail: ctx.guardrail,
+      allowedModels: ctx.allowedModels,
+      keyedProviders: ctx.keyedProviders,
+    });
+    const chain = r.ranked.slice(0, LEG_FALLBACK_CAP);
+    routeCache.set(key, chain);
+    return chain;
+  }
+
+  const soloFallback = async (note: string): Promise<OrchestrationResult> => {
+    const solo = await callLeg(ctx, 'final', strongOrCheap, messages, taskClass, ctx.maxTokens);
+    if ('error' in solo) {
+      return { ...compose('decompose', '', '', legs, taskClass), error: solo.error };
+    }
+    legs.push({ ...solo.leg, note });
+    return { ...compose('decompose', solo.content, solo.leg.model, legs, taskClass), completedN: 0 };
+  };
+
+  // 1) Plan — a medium-tier model splits the task.
+  const planChain = await routeAtTier(messages, 'medium');
+  const planMessages: ChatMessage[] = [
+    { role: 'system', content: PLANNER_SYSTEM },
+    { role: 'user', content: `Task:\n${lastUserText(messages)}\n\nReturn the plan as JSON only.` },
+  ];
+  const planLeg = await callLeg(ctx, 'plan', planChain.length ? planChain : strongOrCheap, planMessages, taskClass, 700);
+  const plan = 'error' in planLeg ? null : parsePlan(planLeg.content, MAX_SUBTASKS);
+  if (!('error' in planLeg)) {
+    legs.push({
+      ...planLeg.leg,
+      outcome: plan ? `${plan.subtasks.length} subtasks` : 'plan-unusable',
+      note: plan ? plan.subtasks.map((s) => s.title).join(' \u2022 ').slice(0, 140) : undefined,
+    });
+  }
+  // Fallback: no usable plan -> a single strong answer.
+  if (!plan) return soloFallback('no plan \u2014 direct answer');
+
+  // 2) Subtasks — run each dependency wave in parallel; a specialist model per subtask.
+  const outputs = new Map<number, { title: string; content: string }>();
+  const subtaskMax = Math.min(ctx.maxTokens, SUBTASK_MAX_TOKENS);
+  for (const wave of planWaves(plan.subtasks)) {
+    if (legs.reduce((a, l) => a + l.costUsd, 0) >= WORKFLOW_MAX_COST_USD) break; // budget guard
+    const settled = await Promise.all(
+      wave.map(async (s) => {
+        const depCtx = s.dependsOn
+          .map((d) => outputs.get(d))
+          .filter((o): o is { title: string; content: string } => !!o)
+          .map((o) => `### ${o.title}\n${o.content.slice(0, DEP_CONTEXT_CHARS)}`)
+          .join('\n\n');
+        const subMessages: ChatMessage[] = [
+          { role: 'system', content: SUBTASK_SYSTEM },
+          { role: 'user', content: depCtx ? `${s.prompt}\n\nContext from earlier steps:\n${depCtx}` : s.prompt },
+        ];
+        const chain = await routeAtTier(subMessages, tierForComplexity(s.complexity));
+        const leg = await callLeg(ctx, `subtask_${s.id}`, chain.length ? chain : cheapChain, subMessages, taskClass, subtaskMax);
+        return { s, leg };
+      }),
+    );
+    for (const { s, leg } of settled) {
+      if ('error' in leg) {
+        legs.push({
+          role: `subtask_${s.id}`,
+          model: '',
+          provider: '',
+          promptTokens: 0,
+          completionTokens: 0,
+          costUsd: 0,
+          latencyMs: 0,
+          outcome: 'failed',
+          note: s.title,
+        });
+        continue;
+      }
+      outputs.set(s.id, { title: s.title, content: leg.content });
+      legs.push({ ...leg.leg, note: s.title });
+    }
+  }
+
+  const completed = [...outputs.values()];
+  const distinctModels = new Set(
+    legs.filter((l) => l.role.startsWith('subtask_') && l.model).map((l) => l.model),
+  );
+  const diversityMode: 'single-model' | 'multi-model' | 'n/a' =
+    distinctModels.size > 1 ? 'multi-model' : distinctModels.size === 1 ? 'single-model' : 'n/a';
+
+  // Fallback: every subtask failed -> single strong answer.
+  if (completed.length === 0) {
+    return { ...(await soloFallback('subtasks failed \u2014 direct answer')), requestedN: plan.subtasks.length, diversityMode };
+  }
+
+  // 3) Compose — a strong model merges the subtask results.
+  const resultsBlock = completed.map((o) => `### ${o.title}\n${o.content}`).join('\n\n');
+  const composeMessages: ChatMessage[] = [
+    { role: 'system', content: COMPOSER_SYSTEM },
+    {
+      role: 'user',
+      content:
+        `Original task:\n${lastUserText(messages)}\n\nCompleted subtask results:\n${resultsBlock}` +
+        (plan.compose ? `\n\nComposition guidance:\n${plan.compose}` : '') +
+        `\n\nWrite the final answer.`,
+    },
+  ];
+  const compLeg = await callLeg(ctx, 'compose', strongOrCheap, composeMessages, taskClass, ctx.maxTokens);
+  let content: string;
+  let chosenModel: string;
+  if ('error' in compLeg) {
+    // Composer failed — return a deterministic merge so the user still gets content.
+    content = completed.map((o) => `## ${o.title}\n${o.content}`).join('\n\n');
+    chosenModel = legs.find((l) => l.role.startsWith('subtask_') && l.model)?.model ?? '';
+  } else {
+    legs.push({ ...compLeg.leg, outcome: 'composed' });
+    content = compLeg.content;
+    chosenModel = compLeg.leg.model;
+  }
+
+  return {
+    ...compose('decompose', content, chosenModel, legs, taskClass),
+    requestedN: plan.subtasks.length,
+    completedN: completed.length,
+    diversityMode,
+    judgeReason: plan.compose ?? null,
+  };
+}
+
 export async function runOrchestration(opts: {
   pattern: OrchestrationPattern;
   messages: ChatMessage[];
@@ -516,5 +759,7 @@ export async function runOrchestration(opts: {
     return runCritique(opts.ctx, opts.messages, cheapChain, strongChain, taskClass);
   if (opts.pattern === 'bestofn')
     return runBestOfN(opts.ctx, opts.messages, cheapChain, strongChain, taskClass);
+  if (opts.pattern === 'decompose')
+    return runDecompose(opts.ctx, opts.messages, cheapChain, strongChain, taskClass);
   return runCascade(opts.ctx, opts.messages, cheapChain, strongChain, taskClass);
 }

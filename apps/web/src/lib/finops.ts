@@ -308,16 +308,17 @@ export async function getFinOps(orgId: string): Promise<FinOpsData | null> {
       (bases.get(base) ?? bases.set(base, []).get(base)!).push(l);
     }
     const roleOf = (l: LegRow) => l.requestId.split('#')[1] ?? '';
-    type Pattern = 'cascade' | 'critique' | 'bestofn';
+    type Pattern = 'cascade' | 'critique' | 'bestofn' | 'decompose';
     const patternOf = (legs: LegRow[]): Pattern | null => {
       const roles = legs.map(roleOf);
+      if (roles.some((r) => r === 'plan' || r === 'compose' || r.startsWith('subtask_'))) return 'decompose';
       if (roles.some((r) => r === 'gate')) return 'cascade';
       if (roles.some((r) => r === 'critic' || r === 'revise')) return 'critique';
       if (roles.some((r) => r === 'judge' || r.startsWith('candidate_'))) return 'bestofn';
       return null;
     };
 
-    const wf: Record<Pattern, LegRow[][]> = { cascade: [], critique: [], bestofn: [] };
+    const wf: Record<Pattern, LegRow[][]> = { cascade: [], critique: [], bestofn: [], decompose: [] };
     for (const legs of bases.values()) {
       const p = patternOf(legs);
       if (p) wf[p].push(legs);
@@ -332,12 +333,22 @@ export async function getFinOps(orgId: string): Promise<FinOpsData | null> {
         (a, l) => a + baselineCost(l.promptTokens, l.completionTokens, gpt4o) - l.cost,
         0,
       );
-      // Cascade/critique are sequential (sum leg latency); best-of-N is parallel.
-      const latencyPerReq = groups.map((legs) =>
-        key === 'bestofn'
-          ? Math.max(0, ...legs.map((l) => l.latency))
-          : legs.reduce((a, l) => a + l.latency, 0),
-      );
+      // Cascade/critique are sequential (sum leg latency); best-of-N is parallel;
+      // decompose is plan + parallel subtasks + compose.
+      const latencyPerReq = groups.map((legs) => {
+        if (key === 'bestofn') return Math.max(0, ...legs.map((l) => l.latency));
+        if (key === 'decompose') {
+          const overhead = legs
+            .filter((l) => roleOf(l) === 'plan' || roleOf(l) === 'compose' || roleOf(l) === 'final')
+            .reduce((a, l) => a + l.latency, 0);
+          const subtaskMax = Math.max(
+            0,
+            ...legs.filter((l) => roleOf(l).startsWith('subtask_')).map((l) => l.latency),
+          );
+          return overhead + subtaskMax;
+        }
+        return legs.reduce((a, l) => a + l.latency, 0);
+      });
       const avgLatency =
         latencyPerReq.length > 0 ? latencyPerReq.reduce((a, b) => a + b, 0) / latencyPerReq.length : 0;
       const okLegs = allLegs.filter((l) => l.status === 'success').length;
@@ -351,7 +362,7 @@ export async function getFinOps(orgId: string): Promise<FinOpsData | null> {
         avgLatencyMs: avgLatency,
         successRatePct: successRate,
         savingsUsd: Math.max(0, savings),
-        estQualityDelta: key === 'critique' ? 4 : key === 'bestofn' ? 5 : 0,
+        estQualityDelta: key === 'critique' ? 4 : key === 'bestofn' ? 5 : key === 'decompose' ? 6 : 0,
       };
       if (key === 'cascade') {
         const escalated = groups.filter((legs) => legs.some((l) => roleOf(l) === 'final')).length;
@@ -368,6 +379,10 @@ export async function getFinOps(orgId: string): Promise<FinOpsData | null> {
       }
       if (key === 'critique') {
         stat.revisionImprovementRatePct = null; // not measured live
+      }
+      if (key === 'decompose') {
+        const counts = groups.map((legs) => legs.filter((l) => roleOf(l).startsWith('subtask_')).length);
+        stat.subtaskAvg = counts.length > 0 ? counts.reduce((a, b) => a + b, 0) / counts.length : 0;
       }
       return stat;
     };
@@ -392,6 +407,7 @@ export async function getFinOps(orgId: string): Promise<FinOpsData | null> {
       buildWorkflow('cascade', 'Cascade'),
       buildWorkflow('critique', 'Critique'),
       buildWorkflow('bestofn', 'Best-of-N'),
+      buildWorkflow('decompose', 'Decompose'),
     ];
 
     // ---- Value efficiency chart ----
