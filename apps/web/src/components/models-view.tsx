@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { Search, Sparkles, X } from 'lucide-react';
 import { formatPricePerM, formatTokens } from '@/lib/format';
+import { ProviderLogo } from '@/components/provider-logo';
 import type { CatalogModel } from '@/lib/catalog-types';
 
 type SortKey = 'featured' | 'name' | 'context' | 'price-low' | 'price-high' | 'new';
@@ -355,9 +356,7 @@ function ModelCard({ model }: { model: CatalogModel }) {
       className="block rounded-xl border border-gray-200 bg-white p-4 transition hover:border-gray-300 hover:shadow-sm"
     >
       <div className="flex items-start gap-3">
-        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-gray-100 text-sm font-semibold text-gray-600">
-          {(model.providerName || model.provider).charAt(0).toUpperCase()}
-        </span>
+        <ProviderLogo slug={model.provider} icon={model.providerIcon} size={36} />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="truncate font-medium text-gray-900">{model.name}</h3>

@@ -1,8 +1,9 @@
 import { and, eq } from 'drizzle-orm';
 import { apiKeys, getDb, guardrails, type GuardrailPolicies } from '@llmgw/db';
+import { createTtlCache } from '../cache/memo';
 
 // The guardrail governing a key: its explicit guardrail, else the workspace default.
-export async function getGuardrailForKey(
+async function loadGuardrailForKey(
   apiKeyId: string,
   workspaceId: string,
 ): Promise<GuardrailPolicies | null> {
@@ -30,4 +31,18 @@ export async function getGuardrailForKey(
   const row = rows[0];
   if (!row || row.status !== 'active') return null;
   return (row.policies as GuardrailPolicies | null) ?? null;
+}
+
+// Guardrails are security policy — short TTL so tightening a policy takes effect fast,
+// while still sparing two DB reads per request under load.
+const guardrailCache = createTtlCache<{ apiKeyId: string; workspaceId: string }, GuardrailPolicies | null>(
+  ({ apiKeyId, workspaceId }) => loadGuardrailForKey(apiKeyId, workspaceId),
+  { ttlMs: 10_000, maxEntries: 20_000, keyOf: (k) => `${k.apiKeyId}:${k.workspaceId}` },
+);
+
+export function getGuardrailForKey(
+  apiKeyId: string,
+  workspaceId: string,
+): Promise<GuardrailPolicies | null> {
+  return guardrailCache.get({ apiKeyId, workspaceId });
 }

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, Send, Sparkles, User } from 'lucide-react';
 import { sendChat } from '@/lib/chat-actions';
+import { ModelPicker } from '@/components/model-picker';
 import { formatTokens } from '@/lib/format';
 import type { ChatMessage, ChatMeta, ChatResult } from '@/lib/chat-types';
 import type { RunnableModel } from '@/lib/catalog-types';
@@ -82,21 +83,7 @@ export function ChatView({ models }: { models: RunnableModel[] }) {
     <div className="flex h-[calc(100vh_-_8rem)] flex-col">
       {/* Top bar */}
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-gray-200 pb-3">
-        <div className="relative">
-          <select
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            className="appearance-none rounded-lg border border-gray-300 bg-white py-1.5 pl-3 pr-8 text-sm font-medium text-gray-800 outline-none focus:border-violet-500"
-          >
-            <option value="auto">Auto Router</option>
-            {models.map((m) => (
-              <option key={m.slug} value={m.slug}>
-                {m.slug}
-              </option>
-            ))}
-          </select>
-          <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-        </div>
+        <ModelPicker models={models} value={model} onChange={setModel} />
 
         <div className="relative">
           <select

@@ -11,22 +11,9 @@ const NAV = [
   { label: 'Benchmarks', href: '/benchmarks' },
   { label: 'Chat', href: '/chat' },
   { label: 'Rankings', href: '/rankings' },
-  { label: 'Apps', href: '/apps' },
-  { label: 'Ori', href: '/ori' },
-  { label: 'Enterprise', href: '/enterprise' },
-  { label: 'Docs', href: '/docs' },
 ];
 
-const SECTION_PREFIXES = [
-  '/models',
-  '/benchmarks',
-  '/chat',
-  '/rankings',
-  '/apps',
-  '/ori',
-  '/enterprise',
-  '/docs',
-];
+const SECTION_PREFIXES = ['/models', '/benchmarks', '/chat', '/rankings'];
 
 export function TopNav() {
   const pathname = usePathname();

@@ -4,6 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft, Check, Copy, Sparkles } from 'lucide-react';
 import { StackedBars, fmtInt } from '@/components/charts';
+import { ProviderLogo } from '@/components/provider-logo';
 import { formatPricePerM, formatTokens } from '@/lib/format';
 import type { CatalogModel, ModelInsights } from '@/lib/catalog-types';
 
@@ -96,9 +97,7 @@ export function ModelDetailView({
       {/* Header */}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex min-w-0 items-start gap-3">
-          <span className="grid h-11 w-11 shrink-0 place-items-center rounded-lg bg-gray-100 text-lg font-semibold text-gray-600">
-            {(model.providerName || model.provider).charAt(0).toUpperCase()}
-          </span>
+          <ProviderLogo slug={model.provider} icon={model.providerIcon} size={44} />
           <div className="min-w-0">
             <h1 className="flex flex-wrap items-center gap-2 text-xl font-semibold text-gray-900">
               {model.providerName}: {model.name}

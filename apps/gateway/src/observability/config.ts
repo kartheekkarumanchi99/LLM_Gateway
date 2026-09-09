@@ -3,18 +3,13 @@ import {
   DEFAULT_OBSERVABILITY_CONFIG,
   getDb,
   observabilityDestinations,
-  workspaceSettings,
   type ObservabilityConfig,
 } from '@llmgw/db';
+import { getWorkspaceSettings } from '../cache/settings';
 
 export async function getObservabilityConfig(workspaceId: string): Promise<ObservabilityConfig> {
-  const db = getDb();
-  const rows = await db
-    .select({ observability: workspaceSettings.observability })
-    .from(workspaceSettings)
-    .where(eq(workspaceSettings.workspaceId, workspaceId))
-    .limit(1);
-  const o = (rows[0]?.observability as Partial<ObservabilityConfig> | null) ?? {};
+  const s = await getWorkspaceSettings(workspaceId);
+  const o = (s.observability as Partial<ObservabilityConfig> | null) ?? {};
   return { ...DEFAULT_OBSERVABILITY_CONFIG, ...o };
 }
 

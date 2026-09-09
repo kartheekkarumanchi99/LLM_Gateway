@@ -1,5 +1,6 @@
 import { and, asc, eq, gte, sql } from 'drizzle-orm';
 import { getHttpDb, models, providers, usageEvents } from '@llmgw/db/http';
+import { ttlMemo } from './cache';
 import type {
   ActivityDay,
   CatalogModel,
@@ -10,7 +11,7 @@ import type {
 } from './catalog-types';
 
 // Full public model catalog (active models), joined to provider display info.
-export async function listCatalogModels(): Promise<CatalogModel[]> {
+async function loadCatalogModels(): Promise<CatalogModel[]> {
   if (!process.env.DATABASE_URL) return [];
   try {
     const db = getHttpDb();
@@ -54,6 +55,12 @@ export async function listCatalogModels(): Promise<CatalogModel[]> {
     console.error('[models] listCatalogModels failed:', (err as Error).message);
     return [];
   }
+}
+
+// The catalog is large and read on several pages — cache it briefly in-process.
+const catalogMemo = ttlMemo(loadCatalogModels, 60_000);
+export function listCatalogModels(): Promise<CatalogModel[]> {
+  return catalogMemo();
 }
 
 const EMPTY_INSIGHTS: ModelInsights = {

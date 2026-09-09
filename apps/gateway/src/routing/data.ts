@@ -1,9 +1,10 @@
 import { and, eq, gte, sql } from 'drizzle-orm';
 import { getDb, models, modelTaskPriors, usageEvents } from '@llmgw/db';
+import { createTtlCache } from '../cache/memo';
 import type { CandidateModel, OwnSignal } from './types';
 
 // Models this gateway can actually execute (adapter + credentials exist).
-export async function getExecutableModels(): Promise<CandidateModel[]> {
+async function loadExecutableModels(): Promise<CandidateModel[]> {
   const db = getDb();
   const rows = await db
     .select({
@@ -28,8 +29,17 @@ export async function getExecutableModels(): Promise<CandidateModel[]> {
   }));
 }
 
+// The catalog changes only on sync-catalog — cache it so routing stays off the DB.
+const catalogCache = createTtlCache<'catalog', CandidateModel[]>(loadExecutableModels, {
+  ttlMs: 60_000,
+  keyOf: () => 'catalog',
+});
+export function getExecutableModels(): Promise<CandidateModel[]> {
+  return catalogCache.get('catalog');
+}
+
 // Behavioral signal from our own traffic over a trailing 7-day window.
-export async function getOwnSignal(taskClass: string): Promise<Map<string, OwnSignal>> {
+async function loadOwnSignal(taskClass: string): Promise<Map<string, OwnSignal>> {
   const db = getDb();
   const since = new Date(Date.now() - 7 * 86_400_000);
   const rows = await db
@@ -48,8 +58,17 @@ export async function getOwnSignal(taskClass: string): Promise<Map<string, OwnSi
   return map;
 }
 
+// Aggregated 7-day signal — a short TTL smooths bursts without hammering the DB.
+const ownSignalCache = createTtlCache<string, Map<string, OwnSignal>>(loadOwnSignal, {
+  ttlMs: 30_000,
+  maxEntries: 200,
+});
+export function getOwnSignal(taskClass: string): Promise<Map<string, OwnSignal>> {
+  return ownSignalCache.get(taskClass);
+}
+
 // Cold-start prior seeded from public/curated task→model strength.
-export async function getPriorSignal(taskClass: string): Promise<Map<string, number>> {
+async function loadPriorSignal(taskClass: string): Promise<Map<string, number>> {
   const db = getDb();
   const rows = await db
     .select({ modelSlug: modelTaskPriors.modelSlug, weight: modelTaskPriors.weight })
@@ -58,4 +77,13 @@ export async function getPriorSignal(taskClass: string): Promise<Map<string, num
   const map = new Map<string, number>();
   for (const r of rows) map.set(r.modelSlug, Number(r.weight));
   return map;
+}
+
+// Priors change only via seed/curation → longer TTL is safe.
+const priorSignalCache = createTtlCache<string, Map<string, number>>(loadPriorSignal, {
+  ttlMs: 60_000,
+  maxEntries: 200,
+});
+export function getPriorSignal(taskClass: string): Promise<Map<string, number>> {
+  return priorSignalCache.get(taskClass);
 }
