@@ -19,6 +19,7 @@ export interface OrchestrationCtx {
   workspaceId: string;
   apiKeyId: string;
   requestId: string;
+  traceId?: string | null;
   appName: string | null;
   guardrail: GuardrailPolicies | null;
   allowedModels: string[];
@@ -196,6 +197,7 @@ async function callLeg(
         latencyMs,
         byok: keyInfo.isByok,
         appName: ctx.appName,
+        traceId: ctx.traceId ?? ctx.requestId,
       });
       return {
         content: extractContent(json),

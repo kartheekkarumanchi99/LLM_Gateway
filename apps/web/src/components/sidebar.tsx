@@ -10,10 +10,14 @@ import {
   CreditCard,
   Eye,
   FileText,
+  FlaskConical,
+  GitPullRequestArrow,
+  History,
   KeyRound,
   KeySquare,
   LayoutDashboard,
   Lock,
+  Radio,
   Route,
   ScrollText,
   Settings,
@@ -41,7 +45,11 @@ const HOME: NavItem[] = [
   { label: 'BYOK', href: '/byok', icon: KeySquare },
   { label: 'Routing', href: '/routing', icon: Route },
   { label: 'Predictive', href: '/predictive', icon: Zap, badge: 'Beta' },
+  { label: 'Reliability', href: '/status', icon: Radio, badge: 'New' },
   { label: 'Presets', href: '/presets', icon: SlidersHorizontal },
+  { label: 'Optimizer', href: '/optimize', icon: FlaskConical, badge: 'New' },
+  { label: 'Evals (CI)', href: '/evals', icon: GitPullRequestArrow, badge: 'New' },
+  { label: 'Time Machine', href: '/traces', icon: History, badge: 'New' },
   { label: 'Tools', href: '/tools', icon: Wrench },
   { label: 'Observability', href: '/observability', icon: Eye },
   { label: 'Classifiers', href: '/classifiers', icon: Tag, badge: 'Beta' },
@@ -94,7 +102,7 @@ export function Sidebar({
     <aside className="flex w-60 shrink-0 flex-col border-r border-gray-200 bg-white">
       <div className="p-3">
         <Link
-          href="/"
+          href="/overview"
           className="flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-50"
         >
           <span className="grid h-5 w-5 place-items-center rounded bg-gray-100 text-[11px] text-gray-500">

@@ -108,7 +108,14 @@ async function callModel(
 ): Promise<{ json: Record<string, unknown>; usage: Usage }> {
   const adapter = getAdapter(m.providerSlug);
   if (!adapter) throw new Error(`no adapter for ${m.providerSlug}`);
-  return adapter.chat(m.upstreamModel, { ...body, model: m.upstreamModel }, apiKey, signal);
+  // Strip gateway-only control fields so they never leak to the upstream provider.
+  const clean = { ...body, model: m.upstreamModel } as ChatCompletionRequest & Record<string, unknown>;
+  delete clean.models;
+  delete clean.cost_tier;
+  delete clean.cache;
+  delete clean.orchestrate;
+  delete clean.max_routing_overhead_ms;
+  return adapter.chat(m.upstreamModel, clean, apiKey, signal);
 }
 
 // Pure config-level eligibility gate (no DB / no upstream) — returns an ineligibility

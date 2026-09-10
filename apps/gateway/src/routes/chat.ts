@@ -21,6 +21,7 @@ import { recordPredictiveEvent } from '../routing/predict-record';
 import { runSpeculativeAuto } from '../routing/speculate';
 import type { PresetParameters } from '@llmgw/db';
 import { recordUsage } from '../billing/record';
+import { recordOutcome, shouldAllow, isProviderFault } from '../reliability/health';
 import { keyUsageUsd, getWorkspaceBudget, workspaceUsageUsd } from '../billing/usage';
 import { getGuardrailForKey } from '../guardrails/load';
 import { checkContent, checkModelAccess } from '../guardrails/enforce';
@@ -73,6 +74,10 @@ export function registerChat(app: FastifyInstance): void {
     const appName =
       (req.headers['x-title'] as string | undefined)?.trim().slice(0, 120) ||
       refererApp(req.headers['referer'] as string | undefined);
+    // Agent Time Machine: correlate multi-step agent runs. Clients pass a stable
+    // X-LLMGW-Trace header across related calls; otherwise each request is its own trace.
+    const traceId =
+      (req.headers['x-llmgw-trace'] as string | undefined)?.trim().slice(0, 120) || requestId;
 
     // Enforce API-key expiry and credit limit (real, per-key).
     if (auth.expiresAt && new Date(auth.expiresAt).getTime() < Date.now()) {
@@ -221,14 +226,16 @@ export function registerChat(app: FastifyInstance): void {
 
     // ---- Semantic response cache: an exact/semantic hit short-circuits routing
     // at ~zero upstream cost (the biggest model-agnostic cost lever) ----
+    // Exact-match cache is always cheap (one indexed lookup). Semantic matching adds a
+    // query-embedding round-trip + vector scan, so it's opt-in via SEMANTIC_CACHE=1.
     const cacheEnabled =
-      (process.env.SEMANTIC_CACHE ?? '1') !== '0' &&
       !body.stream &&
       (body as { cache?: unknown }).cache !== false &&
       Number((body as { temperature?: number }).temperature ?? 0) <= 0.5;
+    const semanticEnabled = (process.env.SEMANTIC_CACHE ?? '0') === '1';
     let cacheEmbedding: number[] | null = null;
     if (cacheEnabled) {
-      const lookup = await lookupCache(auth.workspaceId, auth.orgId, messages, taskClass);
+      const lookup = await lookupCache(auth.workspaceId, auth.orgId, messages, taskClass, { semantic: semanticEnabled });
       cacheEmbedding = lookup.queryEmbedding;
       if (lookup.hit) {
         const h = lookup.hit;
@@ -252,6 +259,7 @@ export function registerChat(app: FastifyInstance): void {
           overrideCostUsd: h.embedCostUsd,
           cached: true,
           appName,
+          traceId,
           latencyMs: Date.now() - started,
           routingTrace: { mode: 'cache', cacheKind: h.kind },
         });
@@ -294,6 +302,7 @@ export function registerChat(app: FastifyInstance): void {
           workspaceId: auth.workspaceId,
           apiKeyId: auth.apiKeyId,
           requestId,
+          traceId,
           appName,
           guardrail,
           allowedModels: routingConfig.autoAllowedModels,
@@ -387,11 +396,14 @@ export function registerChat(app: FastifyInstance): void {
       });
       if (spec) {
         for (const [k, v] of Object.entries(spec.headers)) reply.header(k, v);
+        // Reliability Mesh: the committed speculative model served this request.
+        recordOutcome(spec.providerSlug, { ok: true, latencyMs: Date.now() - started, status: 200 });
         void emitObservability({
           config: obsConfig,
           workspaceId: auth.workspaceId,
           apiKeyId: auth.apiKeyId,
           requestId,
+          traceId,
           modelSlug: spec.chosenModel,
           providerSlug: spec.providerSlug,
           taskClass,
@@ -486,6 +498,11 @@ export function registerChat(app: FastifyInstance): void {
     const upstreamBody: ChatCompletionRequest = { ...body, messages };
     delete (upstreamBody as { models?: unknown }).models;
     delete (upstreamBody as { cost_tier?: unknown }).cost_tier;
+    // Strip gateway-only control fields so they never leak to the upstream provider
+    // (OpenAI rejects unknown args like `cache`).
+    delete (upstreamBody as { cache?: unknown }).cache;
+    delete (upstreamBody as { orchestrate?: unknown }).orchestrate;
+    delete (upstreamBody as { max_routing_overhead_ms?: unknown }).max_routing_overhead_ms;
     if (presetParams) {
       const ub = upstreamBody as { temperature?: number; top_p?: number; max_tokens?: number };
       if (presetParams.temperature != null && ub.temperature == null) ub.temperature = presetParams.temperature;
@@ -495,6 +512,7 @@ export function registerChat(app: FastifyInstance): void {
 
     // ---- Recovery loop: try candidates in order until one succeeds ----
     const preUpstreamMs = Date.now() - started;
+    reply.header('x-llmgw-pre-upstream-ms', String(preUpstreamMs));
     let lastErr: (Error & { status?: number }) | null = null;
     for (const cand of candidates) {
       const adapter = getAdapter(cand.providerSlug);
@@ -514,6 +532,13 @@ export function registerChat(app: FastifyInstance): void {
         trace.attempts.push({ slug: cand.slug, providerSlug: cand.providerSlug, result: 'skipped', reason: 'no provider key' });
         continue;
       }
+      // Reliability Mesh: skip a provider whose circuit breaker is open (a half-open probe
+      // is allowed through periodically to auto-recover). Failover falls to the next
+      // ranked — i.e. same-task, quality-ordered — candidate.
+      if (!shouldAllow(cand.providerSlug)) {
+        trace.attempts.push({ slug: cand.slug, providerSlug: cand.providerSlug, result: 'skipped', reason: 'circuit breaker open' });
+        continue;
+      }
       const providerKey = providerKeyInfo.key;
 
       const billBase = {
@@ -526,6 +551,7 @@ export function registerChat(app: FastifyInstance): void {
         taskClass,
         byok: providerKeyInfo.isByok,
         appName,
+        traceId,
         routingOverheadMs: Date.now() - started,
         promptPricePerM: String(cand.promptPricePerM),
         completionPricePerM: String(cand.completionPricePerM),
@@ -542,10 +568,13 @@ export function registerChat(app: FastifyInstance): void {
           established = await adapter.chatStream(cand.upstreamModel, upstreamBody, providerKey);
         } catch (err) {
           lastErr = err as Error & { status?: number };
+          const st = (err as { status?: number }).status ?? 0;
+          if (isProviderFault(st)) recordOutcome(cand.providerSlug, { ok: false, latencyMs: Date.now() - started, status: st });
           trace.attempts.push({ slug: cand.slug, providerSlug: cand.providerSlug, result: 'error', reason: (err as Error).message });
           continue;
         }
         trace.chosen = cand.slug;
+        recordOutcome(cand.providerSlug, { ok: true, latencyMs: Date.now() - started, status: 200 });
         trace.attempts.push({ slug: cand.slug, providerSlug: cand.providerSlug, result: 'success' });
 
         reply.hijack();
@@ -593,6 +622,7 @@ export function registerChat(app: FastifyInstance): void {
           workspaceId: auth.workspaceId,
           apiKeyId: auth.apiKeyId,
           requestId,
+          traceId,
           modelSlug: cand.slug,
           providerSlug: cand.providerSlug,
           taskClass,
@@ -638,7 +668,9 @@ export function registerChat(app: FastifyInstance): void {
 
       // ---- Non-streaming ----
       try {
+        const attemptStart = Date.now();
         const { json, usage } = await adapter.chat(cand.upstreamModel, upstreamBody, providerKey);
+        recordOutcome(cand.providerSlug, { ok: true, latencyMs: Date.now() - attemptStart, status: 200 });
         trace.chosen = cand.slug;
         trace.attempts.push({ slug: cand.slug, providerSlug: cand.providerSlug, result: 'success' });
         const choice0 = (
@@ -667,6 +699,7 @@ export function registerChat(app: FastifyInstance): void {
           workspaceId: auth.workspaceId,
           apiKeyId: auth.apiKeyId,
           requestId,
+          traceId,
           modelSlug: cand.slug,
           providerSlug: cand.providerSlug,
           taskClass,
@@ -719,6 +752,7 @@ export function registerChat(app: FastifyInstance): void {
             promptTokens: usage.promptTokens,
             completionTokens: usage.completionTokens,
             embedding: cacheEmbedding,
+            semantic: semanticEnabled,
           });
         }
         const enriched = {
@@ -744,6 +778,8 @@ export function registerChat(app: FastifyInstance): void {
         return reply.send(enriched);
       } catch (err) {
         lastErr = err as Error & { status?: number };
+        const st = (err as { status?: number }).status ?? 0;
+        if (isProviderFault(st)) recordOutcome(cand.providerSlug, { ok: false, latencyMs: Date.now() - started, status: st });
         trace.attempts.push({ slug: cand.slug, providerSlug: cand.providerSlug, result: 'error', reason: (err as Error).message });
         continue;
       }
@@ -759,6 +795,7 @@ export function registerChat(app: FastifyInstance): void {
       modelSlug: first.slug,
       providerSlug: first.providerSlug,
       taskClass,
+      traceId,
       promptPricePerM: '0',
       completionPricePerM: '0',
       status: 'error',

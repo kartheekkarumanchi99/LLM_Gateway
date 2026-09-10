@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { ChevronDown, Search } from 'lucide-react';
+import { Search } from 'lucide-react';
 import { BRAND } from '@/lib/brand';
 
 const NAV = [
@@ -15,10 +15,11 @@ const NAV = [
 
 const SECTION_PREFIXES = ['/models', '/benchmarks', '/chat', '/rankings'];
 
-export function TopNav() {
+export function TopNav({ email }: { email?: string | null }) {
   const pathname = usePathname();
   const inSection = SECTION_PREFIXES.some((p) => pathname.startsWith(p));
   const isActive = (href: string) => (href === '/' ? !inSection : pathname.startsWith(href));
+  const initial = (email?.trim()?.[0] ?? '?').toUpperCase();
 
   return (
     <header className="flex h-14 shrink-0 items-center gap-4 border-b border-gray-200 bg-white px-4">
@@ -56,13 +57,29 @@ export function TopNav() {
         ))}
       </nav>
 
-      <button className="ml-auto flex items-center gap-2 rounded-md px-1.5 py-1 text-sm text-gray-700 hover:bg-gray-50 lg:ml-0">
-        <span className="grid h-6 w-6 place-items-center rounded-full bg-orange-500 text-[11px] font-semibold text-white">
-          K
-        </span>
-        <span className="hidden sm:block">Personal</span>
-        <ChevronDown className="h-4 w-4 text-gray-400" />
-      </button>
+      {email ? (
+        <Link
+          href="/overview"
+          className="ml-auto flex items-center gap-2 rounded-md px-1.5 py-1 text-sm text-gray-700 hover:bg-gray-50 lg:ml-0"
+        >
+          <span className="grid h-6 w-6 place-items-center rounded-full bg-gradient-to-br from-violet-500 to-indigo-600 text-[11px] font-semibold text-white">
+            {initial}
+          </span>
+          <span className="hidden max-w-[140px] truncate sm:block">{email}</span>
+        </Link>
+      ) : (
+        <div className="ml-auto flex items-center gap-2 lg:ml-0">
+          <Link href="/login" className="rounded-md px-2.5 py-1.5 text-sm font-medium text-gray-600 hover:text-gray-900">
+            Sign in
+          </Link>
+          <Link
+            href="/register"
+            className="rounded-md bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-700"
+          >
+            Get API Key
+          </Link>
+        </div>
+      )}
     </header>
   );
 }

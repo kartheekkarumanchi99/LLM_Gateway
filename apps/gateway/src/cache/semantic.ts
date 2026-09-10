@@ -12,6 +12,7 @@ const SEMANTIC_THRESHOLD = Number(process.env.SEMANTIC_CACHE_THRESHOLD ?? 0.93);
 const SEMANTIC_SCAN = Number(process.env.SEMANTIC_CACHE_SCAN ?? 300);
 const EMBED_MODEL = 'text-embedding-3-small';
 const EMBED_PRICE_PER_M = 0.02; // USD per 1M tokens
+const EMBED_TIMEOUT_MS = Number(process.env.EMBED_TIMEOUT_MS ?? 4000); // never hang routing on a slow embed
 
 export interface CacheHit {
   kind: 'exact' | 'semantic';
@@ -56,11 +57,14 @@ function queryText(messages: ChatMessage[]): string {
 async function embed(orgId: string, text: string): Promise<{ vec: number[]; costUsd: number } | null> {
   const { key } = await resolveProviderKey(orgId, 'openai');
   if (!key) return null;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), EMBED_TIMEOUT_MS);
   try {
     const res = await fetch(`${config.openaiBaseUrl}/embeddings`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
       body: JSON.stringify({ model: EMBED_MODEL, input: text.slice(0, 8000) }),
+      signal: ctrl.signal,
     });
     if (!res.ok) return null;
     const json = (await res.json()) as {
@@ -73,6 +77,8 @@ async function embed(orgId: string, text: string): Promise<{ vec: number[]; cost
     return { vec, costUsd: (tokens / 1_000_000) * EMBED_PRICE_PER_M };
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -104,76 +110,101 @@ export async function lookupCache(
   orgId: string,
   messages: ChatMessage[],
   taskClass: string,
+  opts?: { semantic?: boolean },
 ): Promise<CacheLookup> {
   const db = getDb();
   const hash = promptHashOf(messages);
 
-  // 1) Exact match — free, no embedding needed.
+  // 1) Exact match — always on: a single indexed lookup, no embedding.
+  let exactRows;
   try {
-    const rows = await db
-      .select()
+    exactRows = await db
+      .select({
+        id: responseCache.id,
+        response: responseCache.response,
+        model: responseCache.model,
+        provider: responseCache.provider,
+        promptTokens: responseCache.promptTokens,
+        completionTokens: responseCache.completionTokens,
+      })
       .from(responseCache)
       .where(and(eq(responseCache.workspaceId, workspaceId), eq(responseCache.promptHash, hash)))
       .limit(1);
-    const r = rows[0];
-    if (r) {
-      bumpHit(r.id);
-      return {
-        hit: {
-          kind: 'exact',
-          similarity: 1,
-          response: r.response as Record<string, unknown>,
-          model: r.model,
-          provider: r.provider,
-          promptTokens: r.promptTokens,
-          completionTokens: r.completionTokens,
-          embedCostUsd: 0,
-        },
-        queryEmbedding: null,
-        embedCostUsd: 0,
-      };
-    }
   } catch (err) {
     console.error('[cache] exact lookup failed:', (err as Error).message);
+    return { hit: null, queryEmbedding: null, embedCostUsd: 0 };
+  }
+  const ex = exactRows[0];
+  if (ex) {
+    bumpHit(ex.id);
+    return {
+      hit: {
+        kind: 'exact',
+        similarity: 1,
+        response: ex.response as Record<string, unknown>,
+        model: ex.model,
+        provider: ex.provider,
+        promptTokens: ex.promptTokens,
+        completionTokens: ex.completionTokens,
+        embedCostUsd: 0,
+      },
+      queryEmbedding: null,
+      embedCostUsd: 0,
+    };
   }
 
-  // 2) Semantic match — embed the query, cosine over recent rows in the same task class.
-  const emb = await embed(orgId, queryText(messages));
-  if (!emb) return { hit: null, queryEmbedding: null, embedCostUsd: 0 };
+  // Semantic matching is opt-in — the fast default path stops here (no embed, no scan).
+  if (!opts?.semantic) return { hit: null, queryEmbedding: null, embedCostUsd: 0 };
 
+  // 2) Semantic candidates in the same task class.
+  let candRows;
   try {
-    const rows = await db
-      .select()
+    candRows = await db
+      .select({
+        id: responseCache.id,
+        embedding: responseCache.embedding,
+        response: responseCache.response,
+        model: responseCache.model,
+        provider: responseCache.provider,
+        promptTokens: responseCache.promptTokens,
+        completionTokens: responseCache.completionTokens,
+      })
       .from(responseCache)
       .where(and(eq(responseCache.workspaceId, workspaceId), eq(responseCache.taskClass, taskClass)))
       .orderBy(desc(responseCache.createdAt))
       .limit(SEMANTIC_SCAN);
-    let best: { id: string; sim: number; row: (typeof rows)[number] } | null = null;
-    for (const r of rows) {
-      const v = r.embedding as number[] | null;
-      if (!Array.isArray(v)) continue;
-      const sim = cosine(emb.vec, v);
-      if (!best || sim > best.sim) best = { id: r.id, sim, row: r };
-    }
-    if (best && best.sim >= SEMANTIC_THRESHOLD) {
-      bumpHit(best.id);
-      return {
-        hit: {
-          kind: 'semantic',
-          similarity: best.sim,
-          response: best.row.response as Record<string, unknown>,
-          model: best.row.model,
-          provider: best.row.provider,
-          promptTokens: best.row.promptTokens,
-          completionTokens: best.row.completionTokens,
-          embedCostUsd: emb.costUsd,
-        },
-        queryEmbedding: emb.vec,
-        embedCostUsd: emb.costUsd,
-      };
-    }
   } catch (err) {
-    console.error('[cache] semantic lookup failed:', (err as Error).message);
+    console.error('[cache] semantic candidates failed:', (err as Error).message);
+    return { hit: null, queryEmbedding: null, embedCostUsd: 0 };
+  }
+  if (candRows.length === 0) return { hit: null, queryEmbedding: null, embedCostUsd: 0 };
+
+  const emb = await embed(orgId, queryText(messages));
+  if (!emb) return { hit: null, queryEmbedding: null, embedCostUsd: 0 };
+
+  let best: { id: string; sim: number; row: (typeof candRows)[number] } | null = null;
+  for (const r of candRows) {
+    const v = r.embedding as number[] | null;
+    if (!Array.isArray(v)) continue;
+    const sim = cosine(emb.vec, v);
+    if (!best || sim > best.sim) best = { id: r.id, sim, row: r };
+  }
+  if (best && best.sim >= SEMANTIC_THRESHOLD) {
+    bumpHit(best.id);
+    return {
+      hit: {
+        kind: 'semantic',
+        similarity: best.sim,
+        response: best.row.response as Record<string, unknown>,
+        model: best.row.model,
+        provider: best.row.provider,
+        promptTokens: best.row.promptTokens,
+        completionTokens: best.row.completionTokens,
+        embedCostUsd: emb.costUsd,
+      },
+      queryEmbedding: emb.vec,
+      embedCostUsd: emb.costUsd,
+    };
   }
   return { hit: null, queryEmbedding: emb.vec, embedCostUsd: emb.costUsd };
 }
@@ -189,12 +220,15 @@ export async function storeCache(opts: {
   promptTokens: number;
   completionTokens: number;
   embedding?: number[] | null;
+  semantic?: boolean;
 }): Promise<void> {
   try {
     const db = getDb();
     const hash = promptHashOf(opts.messages);
-    // Reuse the lookup's embedding when available; otherwise compute once.
-    const vec = opts.embedding ?? (await embed(opts.orgId, queryText(opts.messages)))?.vec ?? null;
+    // Only spend an embedding when semantic matching is enabled; exact-match hits don't
+    // need one, so the default fast path stores with a null embedding.
+    const vec =
+      opts.embedding ?? (opts.semantic ? ((await embed(opts.orgId, queryText(opts.messages)))?.vec ?? null) : null);
     await db
       .insert(responseCache)
       .values({

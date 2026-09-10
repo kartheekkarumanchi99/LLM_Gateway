@@ -221,6 +221,7 @@ export const requestLogs = pgTable(
       .references(() => workspaces.id, { onDelete: 'cascade' }),
     apiKeyId: uuid('api_key_id').references(() => apiKeys.id, { onDelete: 'set null' }),
     requestId: text('request_id').notNull(),
+    traceId: text('trace_id'),
     modelSlug: text('model_slug').notNull(),
     providerSlug: text('provider_slug').notNull(),
     taskClass: text('task_class'),
@@ -266,6 +267,8 @@ export const usageEvents = pgTable(
     ttftMs: integer('ttft_ms'),
     routingOverheadMs: integer('routing_overhead_ms'),
     routingTrace: jsonb('routing_trace'),
+    // Correlates the requests of one multi-step agent run (from an X-LLMGW-Trace header).
+    traceId: text('trace_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
@@ -495,3 +498,162 @@ export const sessions = pgTable(
     userIdx: index('sessions_user_idx').on(t.userId),
   }),
 );
+
+// ---- Prompt Optimization Engine ----
+export const optimizationRuns = pgTable(
+  'optimization_runs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    taskClass: text('task_class'),
+    baselinePrompt: text('baseline_prompt').notNull().default(''),
+    // 'running' | 'complete' | 'error'
+    status: text('status').notNull().default('running'),
+    // { models[], variants, examples:[{input, reference?}], judgeModel, weights:{quality,cost,latency} }
+    config: jsonb('config'),
+    // { baselineScore, winnerScore, qualityDelta, costDelta, latencyDelta, winnerModel }
+    summary: jsonb('summary'),
+    error: text('error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+  },
+  (t) => ({
+    wsIdx: index('optimization_runs_workspace_idx').on(t.workspaceId, t.createdAt),
+  }),
+);
+
+export const optimizationCandidates = pgTable(
+  'optimization_candidates',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => optimizationRuns.id, { onDelete: 'cascade' }),
+    label: text('label').notNull(),
+    prompt: text('prompt').notNull(),
+    modelSlug: text('model_slug').notNull(),
+    isBaseline: boolean('is_baseline').notNull().default(false),
+    isWinner: boolean('is_winner').notNull().default(false),
+    qualityScore: numeric('quality_score', { precision: 6, scale: 2 }).notNull().default('0'),
+    avgCostUsd: numeric('avg_cost_usd', { precision: 20, scale: 10 }).notNull().default('0'),
+    avgLatencyMs: integer('avg_latency_ms').notNull().default(0),
+    compositeScore: numeric('composite_score', { precision: 6, scale: 2 }).notNull().default('0'),
+    sampleCount: integer('sample_count').notNull().default(0),
+    notes: text('notes'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    runIdx: index('optimization_candidates_run_idx').on(t.runId),
+  }),
+);
+
+// ---- Agent Time Machine ----
+export const traceAnnotations = pgTable(
+  'trace_annotations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    traceId: text('trace_id').notNull(),
+    note: text('note'),
+    starred: boolean('starred').notNull().default(false),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    wsTraceUq: uniqueIndex('trace_annotations_ws_trace_uq').on(t.workspaceId, t.traceId),
+  }),
+);
+
+// ---- Prompt & Model CI ----
+export const evalSets = pgTable(
+  'eval_sets',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    description: text('description'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    wsIdx: index('eval_sets_workspace_idx').on(t.workspaceId, t.createdAt),
+  }),
+);
+
+export const evalCases = pgTable(
+  'eval_cases',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    evalSetId: uuid('eval_set_id')
+      .notNull()
+      .references(() => evalSets.id, { onDelete: 'cascade' }),
+    // ChatMessage[] captured from production (request_logs) or authored by hand.
+    input: jsonb('input').notNull(),
+    reference: text('reference'),
+    sourceRequestId: text('source_request_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    setIdx: index('eval_cases_set_idx').on(t.evalSetId),
+  }),
+);
+
+export const evalRuns = pgTable(
+  'eval_runs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    evalSetId: uuid('eval_set_id')
+      .notNull()
+      .references(() => evalSets.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    // 'prompt' | 'model' | 'preset' — what changed vs the baseline.
+    mode: text('mode').notNull().default('prompt'),
+    candidateModel: text('candidate_model').notNull(),
+    candidatePrompt: text('candidate_prompt'),
+    baselineModel: text('baseline_model'),
+    baselinePrompt: text('baseline_prompt'),
+    judgeModel: text('judge_model'),
+    // 'running' | 'complete' | 'error'
+    status: text('status').notNull().default('running'),
+    // { candidate:{quality,cost,latency}, baseline:{...}, qualityDelta, costDeltaPct,
+    //   latencyDeltaPct, casesPassed, casesTotal, verdict }
+    summary: jsonb('summary'),
+    error: text('error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+  },
+  (t) => ({
+    wsIdx: index('eval_runs_workspace_idx').on(t.workspaceId, t.createdAt),
+  }),
+);
+
+export const evalRunCases = pgTable(
+  'eval_run_cases',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    evalRunId: uuid('eval_run_id')
+      .notNull()
+      .references(() => evalRuns.id, { onDelete: 'cascade' }),
+    caseId: uuid('case_id').notNull(),
+    // 'candidate' | 'baseline'
+    variant: text('variant').notNull(),
+    output: text('output'),
+    qualityScore: numeric('quality_score', { precision: 6, scale: 2 }).notNull().default('0'),
+    costUsd: numeric('cost_usd', { precision: 20, scale: 10 }).notNull().default('0'),
+    latencyMs: integer('latency_ms').notNull().default(0),
+    passed: boolean('passed').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    runIdx: index('eval_run_cases_run_idx').on(t.evalRunId),
+  }),
+);
+

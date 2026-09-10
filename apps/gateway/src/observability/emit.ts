@@ -7,6 +7,7 @@ export interface EmitParams {
   workspaceId: string;
   apiKeyId: string;
   requestId: string;
+  traceId?: string | null;
   modelSlug: string;
   providerSlug: string;
   taskClass: string;
@@ -24,6 +25,7 @@ async function logRequest(p: EmitParams): Promise<void> {
     workspaceId: p.workspaceId,
     apiKeyId: p.apiKeyId,
     requestId: p.requestId,
+    traceId: p.traceId ?? null,
     modelSlug: p.modelSlug,
     providerSlug: p.providerSlug,
     taskClass: p.taskClass,

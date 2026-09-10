@@ -1,3 +1,4 @@
+import { cache } from 'react';
 import { and, eq } from 'drizzle-orm';
 import { cookies } from 'next/headers';
 import { getHttpDb, organizations, users, workspaces } from '@llmgw/db/http';
@@ -12,18 +13,19 @@ const userCols = {
   createdAt: users.createdAt,
 };
 
-async function demoOrg() {
+const demoOrg = cache(async () => {
   const rows = await getHttpDb()
     .select()
     .from(organizations)
     .where(eq(organizations.slug, 'demo'))
     .limit(1);
   return rows[0] ?? null;
-}
+});
 
 // Active org: the signed-in user's org, else the seeded demo org (so local/demo
-// mode keeps working until AUTH_REQUIRED is enabled).
-export async function getCurrentOrg() {
+// mode keeps working until AUTH_REQUIRED is enabled). cache() dedupes it within a
+// single request (layout + page share one query).
+export const getCurrentOrg = cache(async () => {
   if (!process.env.DATABASE_URL) return null;
   try {
     const sessionUser = await getSessionUser();
@@ -40,11 +42,11 @@ export async function getCurrentOrg() {
     console.error('[session] database unavailable:', (err as Error).message);
     return null;
   }
-}
+});
 
 // Active workspace: the one pinned via cookie (validated against the org), else
-// the org's first workspace.
-export async function getCurrentWorkspace() {
+// the org's first workspace. cache() dedupes it within a single request.
+export const getCurrentWorkspace = cache(async () => {
   const org = await getCurrentOrg();
   if (!org) return null;
   try {
@@ -71,10 +73,10 @@ export async function getCurrentWorkspace() {
     console.error('[session] database unavailable:', (err as Error).message);
     return null;
   }
-}
+});
 
-// Account owner: the signed-in user, else the org's first user.
-export async function getCurrentUser() {
+// Account owner: the signed-in user, else the org's first user. cache() dedupes it.
+export const getCurrentUser = cache(async () => {
   if (!process.env.DATABASE_URL) return null;
   try {
     const db = getHttpDb();
@@ -107,4 +109,4 @@ export async function getCurrentUser() {
     console.error('[session] database unavailable:', (err as Error).message);
     return null;
   }
-}
+});

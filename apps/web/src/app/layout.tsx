@@ -3,8 +3,9 @@ import './globals.css';
 import { BRAND } from '@/lib/brand';
 
 export const metadata: Metadata = {
-  title: `${BRAND} — Dashboard`,
-  description: 'Unified LLM gateway dashboard',
+  title: `${BRAND} — One API for every model`,
+  description:
+    'Intelligent routing, self-healing failover, and full observability for every LLM — behind a single OpenAI-compatible endpoint.',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

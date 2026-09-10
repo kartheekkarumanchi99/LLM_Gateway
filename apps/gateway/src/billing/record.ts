@@ -25,6 +25,7 @@ export interface RecordParams {
   ttftMs?: number | null;
   routingOverheadMs?: number | null;
   routingTrace?: unknown;
+  traceId?: string | null;
 }
 
 /**
@@ -67,6 +68,7 @@ export async function recordUsage(p: RecordParams): Promise<number> {
           ttftMs: p.ttftMs ?? null,
           routingOverheadMs: p.routingOverheadMs ?? null,
           routingTrace: (p.routingTrace ?? null) as object | null,
+          traceId: p.traceId ?? null,
         })
         .onConflictDoNothing({ target: usageEvents.requestId })
         .returning({ id: usageEvents.id });

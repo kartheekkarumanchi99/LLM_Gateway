@@ -19,6 +19,8 @@ export * from './predictive-config';
 export * from './observability';
 export * from './classifiers-config';
 export * from './providers-catalog';
+export * from './optimization-config';
+export * from './eval-config';
 
 let pool: Pool | undefined;
 let dbInstance: NodePgDatabase<typeof schema> | undefined;

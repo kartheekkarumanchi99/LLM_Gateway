@@ -5,7 +5,7 @@ import { getCurrentWorkspace } from './session';
 import type { ChatMessage, ChatResult } from './chat-types';
 
 const PLAYGROUND_KEY_NAME = 'Playground (internal)';
-const GATEWAY_URL = process.env.GATEWAY_URL ?? 'http://127.0.0.1:8787';
+export const GATEWAY_URL = process.env.GATEWAY_URL ?? 'http://127.0.0.1:8787';
 
 // The playground calls the gateway like any client, so it needs a real API key.
 // We mint one for the workspace and cache it in memory (never sent to the browser).
@@ -54,7 +54,7 @@ function errorResult(error: string, durationMs = 0): ChatResult {
   };
 }
 
-async function ensurePlaygroundKey(workspaceId: string): Promise<string> {
+export async function ensurePlaygroundKey(workspaceId: string): Promise<string> {
   if (cachedRaw && cachedWorkspaceId === workspaceId) return cachedRaw;
   const db = getHttpDb();
   const raw = 'sk-llmgw-' + randomBytes(24).toString('hex');

@@ -5,6 +5,9 @@ import { registerModels } from './routes/models';
 import { registerChat } from './routes/chat';
 import { registerAdmin } from './routes/admin';
 import { registerRouting } from './routes/routing';
+import { registerOptimize } from './routes/optimize';
+import { registerReliability } from './routes/reliability';
+import { registerEval } from './routes/eval';
 
 export function buildServer(): FastifyInstance {
   const app = Fastify({
@@ -20,6 +23,9 @@ export function buildServer(): FastifyInstance {
   registerChat(app);
   registerAdmin(app);
   registerRouting(app);
+  registerOptimize(app);
+  registerReliability(app);
+  registerEval(app);
 
   return app;
 }

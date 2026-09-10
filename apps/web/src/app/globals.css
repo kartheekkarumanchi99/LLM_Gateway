@@ -27,3 +27,258 @@ body {
 .scrollbar-thin::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* ---- Landing page aesthetics ---- */
+.lg-grid {
+  background-image:
+    linear-gradient(to right, rgba(17, 24, 39, 0.045) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(17, 24, 39, 0.045) 1px, transparent 1px);
+  background-size: 44px 44px;
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 0%, #000 55%, transparent 100%);
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 0%, #000 55%, transparent 100%);
+}
+.lg-glow {
+  background:
+    radial-gradient(600px circle at 50% -10%, rgba(124, 92, 255, 0.18), transparent 60%),
+    radial-gradient(500px circle at 85% 10%, rgba(99, 102, 241, 0.12), transparent 55%);
+}
+.lg-hero-text {
+  background: linear-gradient(100deg, #111827 15%, #7c5cff 38%, #a855f7 50%, #7c5cff 62%, #111827 85%);
+  background-size: 220% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: lg-shine 7s linear infinite;
+}
+@keyframes lg-shine {
+  to {
+    background-position: 220% center;
+  }
+}
+@keyframes lg-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+    filter: blur(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+.lg-reveal {
+  opacity: 0;
+}
+.lg-reveal.lg-in {
+  animation: lg-fade-up 0.7s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+@keyframes lg-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+.lg-float {
+  animation: lg-float 5s ease-in-out infinite;
+}
+@keyframes lg-pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(16, 185, 129, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+  }
+}
+.lg-pulse {
+  animation: lg-pulse-ring 2.2s infinite;
+}
+
+/* Aurora drifting orbs behind the hero */
+.lg-blob {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(80px);
+  opacity: 0.5;
+  will-change: transform;
+}
+.lg-blob-1 {
+  width: 440px;
+  height: 440px;
+  left: 6%;
+  top: -150px;
+  background: radial-gradient(circle, rgba(124, 92, 255, 0.6), transparent 70%);
+  animation: lg-drift-a 15s ease-in-out infinite;
+}
+.lg-blob-2 {
+  width: 400px;
+  height: 400px;
+  right: 4%;
+  top: -110px;
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.55), transparent 70%);
+  animation: lg-drift-b 19s ease-in-out infinite;
+}
+.lg-blob-3 {
+  width: 360px;
+  height: 360px;
+  left: 42%;
+  top: 20px;
+  background: radial-gradient(circle, rgba(217, 70, 239, 0.4), transparent 70%);
+  animation: lg-drift-c 17s ease-in-out infinite;
+}
+@keyframes lg-drift-a {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(50px, 40px) scale(1.15);
+  }
+}
+@keyframes lg-drift-b {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(-45px, 30px) scale(1.1);
+  }
+}
+@keyframes lg-drift-c {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(25px, -35px) scale(1.2);
+  }
+}
+
+/* Pointer-following hero glow */
+.lg-hero-spot {
+  background: radial-gradient(480px circle at var(--hx, 50%) var(--hy, -10%), rgba(124, 92, 255, 0.15), transparent 70%);
+}
+
+/* Marquee (infinite horizontal scroll) */
+.lg-marquee-wrap {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
+}
+.lg-marquee {
+  display: flex;
+  width: max-content;
+  animation: lg-marquee 32s linear infinite;
+}
+.lg-marquee-wrap:hover .lg-marquee {
+  animation-play-state: paused;
+}
+@keyframes lg-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+/* Cursor-following gradient border (spotlight card) */
+.lg-spot {
+  position: relative;
+}
+.lg-spot::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: radial-gradient(180px circle at var(--mx, 50%) var(--my, 0%), rgba(124, 92, 255, 0.65), transparent 70%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0;
+  transition: opacity 0.3s;
+  pointer-events: none;
+}
+.lg-spot:hover::before {
+  opacity: 1;
+}
+
+/* Sheen sweep (CTA) */
+.lg-sheen::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.22), transparent);
+  transform: translateX(-150%) skewX(-18deg);
+  animation: lg-sheen 5.5s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes lg-sheen {
+  0% {
+    transform: translateX(-150%) skewX(-18deg);
+  }
+  55%,
+  100% {
+    transform: translateX(320%) skewX(-18deg);
+  }
+}
+
+/* Live scan line + status blink */
+.lg-scan {
+  animation: lg-scan-move 3.5s ease-in-out infinite;
+}
+@keyframes lg-scan-move {
+  0%,
+  100% {
+    opacity: 0.15;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+.lg-blink {
+  animation: lg-blink-a 1s ease-in-out infinite;
+}
+@keyframes lg-blink-a {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lg-reveal,
+  .lg-reveal.lg-in {
+    animation: none;
+    opacity: 1;
+  }
+  .lg-float,
+  .lg-pulse,
+  .lg-hero-text,
+  .lg-marquee,
+  .lg-blob-1,
+  .lg-blob-2,
+  .lg-blob-3,
+  .lg-scan,
+  .lg-blink {
+    animation: none;
+  }
+  .lg-sheen::after {
+    animation: none;
+    opacity: 0;
+  }
+  .lg-hero-text {
+    background: #111827;
+    -webkit-background-clip: text;
+    background-clip: text;
+  }
+}
+

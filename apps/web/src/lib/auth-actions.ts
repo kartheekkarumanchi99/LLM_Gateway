@@ -87,7 +87,7 @@ export async function registerAction(
   });
 
   await createUserSession(user.id);
-  redirect('/');
+  redirect('/overview');
 }
 
 export async function loginAction(_prev: AuthState | null, formData: FormData): Promise<AuthState> {
@@ -109,7 +109,7 @@ export async function loginAction(_prev: AuthState | null, formData: FormData): 
   }
 
   await createUserSession(user.id);
-  redirect('/');
+  redirect('/overview');
 }
 
 export async function logoutAction(): Promise<void> {

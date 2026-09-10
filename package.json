@@ -15,7 +15,9 @@
     "db:verify": "pnpm --filter @llmgw/db verify",
     "probe": "pnpm --filter @llmgw/db probe",
     "bench": "pnpm --filter @llmgw/db bench",
-    "db:migrate:predictive": "pnpm --filter @llmgw/db migrate:predictive"
+    "db:migrate:predictive": "pnpm --filter @llmgw/db migrate:predictive",
+    "db:migrate:timemachine": "pnpm --filter @llmgw/db migrate:timemachine",
+    "db:migrate:promptci": "pnpm --filter @llmgw/db migrate:promptci"
   },
   "packageManager": "pnpm@10.9.0",
   "engines": {

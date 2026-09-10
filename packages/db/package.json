@@ -19,6 +19,8 @@
     "probe": "tsx src/probe.ts",
     "bench": "tsx src/bench.ts",
     "migrate:predictive": "tsx src/predictive-migration.ts",
+    "migrate:timemachine": "tsx src/timemachine-migration.ts",
+    "migrate:promptci": "tsx src/promptci-migration.ts",
     "studio": "drizzle-kit studio"
   },
   "dependencies": {
