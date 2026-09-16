@@ -172,6 +172,8 @@ export const workspaceSettings = pgTable('workspace_settings', {
   tools: jsonb('tools'),
   observability: jsonb('observability'),
   predictive: jsonb('predictive'),
+  // Shadow Model Drift & Regression Sentinel config (SentinelConfig).
+  sentinel: jsonb('sentinel'),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -654,6 +656,125 @@ export const evalRunCases = pgTable(
   },
   (t) => ({
     runIdx: index('eval_run_cases_run_idx').on(t.evalRunId),
+  }),
+);
+
+// ---- Shadow Model Drift & Regression Sentinel ----
+// A PII-scrubbed duplicate of a production request, queued for background evaluation
+// against candidate models. `referenceOutput` is the answer production actually served.
+export const shadowSamples = pgTable(
+  'shadow_samples',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    requestId: text('request_id').notNull(),
+    taskClass: text('task_class').notNull(),
+    baselineModel: text('baseline_model').notNull(),
+    baselineProvider: text('baseline_provider').notNull(),
+    // Scrubbed ChatMessage[] (guardrail PII redaction applied before storage).
+    messages: jsonb('messages').notNull(),
+    referenceOutput: text('reference_output').notNull(),
+    referenceTokens: integer('reference_tokens').notNull().default(0),
+    scrubbed: boolean('scrubbed').notNull().default(false),
+    maxTokens: integer('max_tokens').notNull().default(512),
+    // 'pending' | 'evaluated' | 'error' | 'skipped'
+    status: text('status').notNull().default('pending'),
+    error: text('error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    evaluatedAt: timestamp('evaluated_at', { withTimezone: true }),
+  },
+  (t) => ({
+    statusIdx: index('shadow_samples_status_idx').on(t.status, t.createdAt),
+    wsIdx: index('shadow_samples_ws_idx').on(t.workspaceId, t.createdAt),
+  }),
+);
+
+// One candidate model's shadow result for a sample: its output judged 0..100 against the
+// reference, plus the output-length ratio (candidate / reference) used for inflation drift.
+export const shadowEvals = pgTable(
+  'shadow_evals',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    sampleId: uuid('sample_id')
+      .notNull()
+      .references(() => shadowSamples.id, { onDelete: 'cascade' }),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    taskClass: text('task_class').notNull(),
+    candidateModel: text('candidate_model').notNull(),
+    candidateProvider: text('candidate_provider').notNull(),
+    output: text('output'),
+    qualityScore: numeric('quality_score', { precision: 6, scale: 2 }).notNull().default('0'),
+    candidateTokens: integer('candidate_tokens').notNull().default(0),
+    lengthRatio: numeric('length_ratio', { precision: 10, scale: 4 }).notNull().default('1'),
+    costUsd: numeric('cost_usd', { precision: 20, scale: 10 }).notNull().default('0'),
+    latencyMs: integer('latency_ms').notNull().default(0),
+    // 'ok' | 'error'
+    status: text('status').notNull().default('ok'),
+    error: text('error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    modelIdx: index('shadow_evals_model_idx').on(t.candidateModel, t.taskClass, t.createdAt),
+    sampleIdx: index('shadow_evals_sample_idx').on(t.sampleId),
+  }),
+);
+
+// The established "known-good" behavioral baseline per (model, task). EWMA-updated while a
+// model is healthy; frozen while drifted so a bad checkpoint can't poison its own reference.
+export const modelBaselines = pgTable(
+  'model_baselines',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    modelSlug: text('model_slug').notNull(),
+    taskClass: text('task_class').notNull(),
+    meanQuality: numeric('mean_quality', { precision: 6, scale: 2 }).notNull().default('0'),
+    meanLengthRatio: numeric('mean_length_ratio', { precision: 10, scale: 4 }).notNull().default('1'),
+    sampleCount: integer('sample_count').notNull().default(0),
+    // Behavioral fingerprint (rounded quality|length bucket) — a change implies a new checkpoint.
+    fingerprint: text('fingerprint'),
+    // Current drift state + applied routing weight (mirrors the in-process registry).
+    status: text('status').notNull().default('establishing'),
+    healthMultiplier: numeric('health_multiplier', { precision: 6, scale: 4 }).notNull().default('1'),
+    establishedAt: timestamp('established_at', { withTimezone: true }),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    uq: uniqueIndex('model_baselines_uq').on(t.modelSlug, t.taskClass),
+  }),
+);
+
+// Self-healing audit log: every drift detection + auto re-weight (and recovery) action.
+export const driftEvents = pgTable(
+  'drift_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    modelSlug: text('model_slug').notNull(),
+    taskClass: text('task_class').notNull(),
+    // 'quality_drop' | 'length_inflation' | 'recovered'
+    kind: text('kind').notNull(),
+    baselineQuality: numeric('baseline_quality', { precision: 6, scale: 2 }).notNull().default('0'),
+    observedQuality: numeric('observed_quality', { precision: 6, scale: 2 }).notNull().default('0'),
+    qualityDropPct: numeric('quality_drop_pct', { precision: 8, scale: 2 }).notNull().default('0'),
+    baselineLengthRatio: numeric('baseline_length_ratio', { precision: 10, scale: 4 }).notNull().default('1'),
+    observedLengthRatio: numeric('observed_length_ratio', { precision: 10, scale: 4 }).notNull().default('1'),
+    lengthInflationPct: numeric('length_inflation_pct', { precision: 8, scale: 2 }).notNull().default('0'),
+    healthMultiplier: numeric('health_multiplier', { precision: 6, scale: 4 }).notNull().default('1'),
+    sampleCount: integer('sample_count').notNull().default(0),
+    detail: text('detail'),
+    // Set when a later 'recovered' event closes out this drift.
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    modelIdx: index('drift_events_model_idx').on(t.modelSlug, t.taskClass, t.createdAt),
+    openIdx: index('drift_events_open_idx').on(t.resolvedAt),
   }),
 );
 

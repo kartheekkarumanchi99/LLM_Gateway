@@ -22,9 +22,11 @@ import { runSpeculativeAuto } from '../routing/speculate';
 import type { PresetParameters } from '@llmgw/db';
 import { recordUsage } from '../billing/record';
 import { recordOutcome, shouldAllow, isProviderFault } from '../reliability/health';
+import { runSpeculativeDecode } from '../speculative/decode';
 import { keyUsageUsd, getWorkspaceBudget, workspaceUsageUsd } from '../billing/usage';
 import { getGuardrailForKey } from '../guardrails/load';
 import { checkContent, checkModelAccess } from '../guardrails/enforce';
+import { maybeShadowSample } from '../sentinel/sample';
 
 const ZERO_USAGE: Usage = {
   promptTokens: 0,
@@ -287,6 +289,72 @@ export function registerChat(app: FastifyInstance): void {
 
     // ---- Compound orchestration (HydraFusion-style): draft -> gate/critique -> escalate/revise ----
     const orchestrateRaw = (body as { orchestrate?: unknown }).orchestrate;
+
+    // ---- Speculative cross-provider decoding (streaming): fast drafter, frontier fork ----
+    if (body.stream && orchestrateRaw === 'speculative') {
+      const sb = body as {
+        spec_draft_model?: unknown;
+        spec_verify_model?: unknown;
+        spec_confidence?: unknown;
+        temperature?: number;
+      };
+      const spec = runSpeculativeDecode({
+        messages,
+        draftModel: typeof sb.spec_draft_model === 'string' ? sb.spec_draft_model : null,
+        verifyModel: typeof sb.spec_verify_model === 'string' ? sb.spec_verify_model : null,
+        confidenceThreshold: typeof sb.spec_confidence === 'number' ? sb.spec_confidence : undefined,
+        temperature: typeof sb.temperature === 'number' ? sb.temperature : undefined,
+        ctx: {
+          orgId: auth.orgId,
+          workspaceId: auth.workspaceId,
+          apiKeyId: auth.apiKeyId,
+          requestId,
+          traceId,
+          appName,
+          guardrail,
+          allowedModels: routingConfig.autoAllowedModels,
+          keyedProviders,
+          maxTokens,
+          startedAt: started,
+        },
+      });
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache, no-transform',
+        connection: 'keep-alive',
+        'x-llmgw-mode': 'speculative',
+      });
+      const reader = spec.stream.getReader();
+      req.raw.on('close', () => void reader.cancel().catch(() => {}));
+      for (;;) {
+        const { done: sdone, value } = await reader.read();
+        if (sdone) break;
+        if (value) reply.raw.write(Buffer.from(value));
+      }
+      reply.raw.end();
+      const summary = await spec.done;
+      const finalModel = summary.verifyModel ?? summary.draftModel;
+      void maybeLowBalanceAlert(auth.orgId, auth.workspaceId);
+      void emitObservability({
+        config: obsConfig,
+        workspaceId: auth.workspaceId,
+        apiKeyId: auth.apiKeyId,
+        requestId,
+        traceId,
+        modelSlug: finalModel || 'speculative',
+        providerSlug: finalModel.includes('/') ? finalModel.split('/')[0]! : 'speculative',
+        taskClass: 'speculative',
+        messages,
+        completion: summary.content,
+        promptTokens: 0,
+        completionTokens: summary.draftTokens + summary.verifyTokens,
+        costUsd: summary.totalCostUsd,
+        latencyMs: Date.now() - started,
+      });
+      return reply;
+    }
+
     if (
       !body.stream &&
       (orchestrateRaw === 'cascade' ||
@@ -718,6 +786,20 @@ export function registerChat(app: FastifyInstance): void {
           completion: completionText,
         });
         void maybeLowBalanceAlert(auth.orgId, auth.workspaceId);
+        // Drift Sentinel: shadow-sample this served request (scrubbed) for background
+        // drift evaluation against candidate models.
+        void maybeShadowSample({
+          orgId: auth.orgId,
+          workspaceId: auth.workspaceId,
+          requestId,
+          taskClass,
+          baselineModel: cand.slug,
+          baselineProvider: cand.providerSlug,
+          messages,
+          referenceOutput: completionText,
+          referenceTokens: usage.completionTokens,
+          maxTokens,
+        });
         if (prediction) {
           void recordPredictiveEvent({
             requestId,

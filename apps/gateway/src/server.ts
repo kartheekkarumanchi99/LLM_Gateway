@@ -8,6 +8,7 @@ import { registerRouting } from './routes/routing';
 import { registerOptimize } from './routes/optimize';
 import { registerReliability } from './routes/reliability';
 import { registerEval } from './routes/eval';
+import { registerSentinel } from './routes/sentinel';
 
 export function buildServer(): FastifyInstance {
   const app = Fastify({
@@ -26,6 +27,7 @@ export function buildServer(): FastifyInstance {
   registerOptimize(app);
   registerReliability(app);
   registerEval(app);
+  registerSentinel(app);
 
   return app;
 }

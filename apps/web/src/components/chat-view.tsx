@@ -17,7 +17,7 @@ interface Item {
   error?: boolean;
 }
 
-type OrchestrationMode = 'single' | 'cascade' | 'critique' | 'bestofn' | 'decompose';
+type OrchestrationMode = 'single' | 'cascade' | 'critique' | 'bestofn' | 'decompose' | 'speculative';
 
 const COST_TIERS = ['low', 'medium', 'high', 'max'];
 
@@ -91,13 +91,14 @@ export function ChatView({ models }: { models: RunnableModel[] }) {
             value={mode}
             onChange={(e) => setMode(e.target.value as OrchestrationMode)}
             className="appearance-none rounded-lg border border-gray-300 bg-white py-1.5 pl-3 pr-8 text-sm text-gray-700 outline-none focus:border-violet-500"
-            title="Workflow: Single routes to one model; Cascade drafts cheap then escalates on a quality gate; Critique drafts, reviews, and revises; Best-of-N runs several cheap models in parallel and a judge picks the winner; Decompose splits the task into subtasks, routes each to a specialist model in parallel, then composes the answer."
+            title="Workflow: Single routes to one model; Cascade drafts cheap then escalates on a quality gate; Critique drafts, reviews, and revises; Best-of-N runs several cheap models in parallel and a judge picks the winner; Decompose splits the task into subtasks, routes each to a specialist model in parallel, then composes the answer; Speculative streams from a fast cheap drafter and forks mid-stream to a frontier verifier the moment the drafter loses confidence."
           >
             <option value="single">Single</option>
             <option value="cascade">Cascade</option>
             <option value="critique">Critique</option>
             <option value="bestofn">Best-of-N</option>
             <option value="decompose">Decompose</option>
+            <option value="speculative">Speculative</option>
           </select>
           <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
         </div>

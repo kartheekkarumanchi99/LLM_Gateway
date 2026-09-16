@@ -82,6 +82,160 @@ export async function ensurePlaygroundKey(workspaceId: string): Promise<string> 
   return raw;
 }
 
+interface SpecMeta {
+  draft_model?: unknown;
+  verify_model?: unknown;
+  forked?: unknown;
+  fork_at_chars?: unknown;
+  ttft_ms?: unknown;
+  draft_tokens?: unknown;
+  verify_tokens?: unknown;
+  draft_prompt_tokens?: unknown;
+  verify_prompt_tokens?: unknown;
+  mean_draft_confidence?: unknown;
+  draft_cost_usd?: unknown;
+  verify_cost_usd?: unknown;
+  total_cost_usd?: unknown;
+}
+
+// Consume a speculative-decode SSE stream to completion, accumulating the streamed
+// content and reading the in-band `_speculative` summary emitted on the final chunk.
+async function speculativeChat(
+  key: string,
+  body: Record<string, unknown>,
+  model: string,
+): Promise<ChatResult> {
+  const started = Date.now();
+  let res: Response;
+  try {
+    res = await fetch(`${GATEWAY_URL}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${key}`,
+        'content-type': 'application/json',
+        'x-title': 'Playground',
+      },
+      body: JSON.stringify({ ...body, stream: true }),
+    });
+  } catch (err) {
+    return errorResult(
+      `Could not reach the gateway at ${GATEWAY_URL}. Is it running? ${(err as Error).message}`,
+      Date.now() - started,
+    );
+  }
+  if (!res.ok || !res.body) {
+    let msg = `Gateway error ${res.status}`;
+    try {
+      const j = (await res.json()) as GatewayResponse;
+      msg = str(j?.error?.message) ?? msg;
+    } catch {
+      /* non-JSON body */
+    }
+    return errorResult(msg, Date.now() - started);
+  }
+
+  let content = '';
+  let spec: SpecMeta | null = null;
+  let clientTtftMs = 0;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (payload === '[DONE]') continue;
+        let obj: Record<string, unknown>;
+        try {
+          obj = JSON.parse(payload);
+        } catch {
+          continue;
+        }
+        const choice = (obj.choices as Array<Record<string, unknown>> | undefined)?.[0];
+        const delta = (choice?.delta as { content?: unknown } | undefined) ?? {};
+        if (typeof delta.content === 'string' && delta.content) {
+          if (clientTtftMs === 0) clientTtftMs = Date.now() - started;
+          content += delta.content;
+        }
+        if (obj._speculative && typeof obj._speculative === 'object') {
+          spec = obj._speculative as SpecMeta;
+        }
+      }
+    }
+  } catch (err) {
+    if (!content) return errorResult((err as Error).message, Date.now() - started);
+  }
+
+  const durationMs = Date.now() - started;
+  const draftModel = str(spec?.draft_model) ?? model;
+  const verifyModel = str(spec?.verify_model);
+  const forked = spec?.forked === true;
+  const finalModel = verifyModel ?? draftModel;
+  const draftCost = num(spec?.draft_cost_usd);
+  const verifyCost = num(spec?.verify_cost_usd);
+  const totalCost = spec?.total_cost_usd != null ? num(spec.total_cost_usd) : draftCost + verifyCost;
+  const draftTokens = num(spec?.draft_tokens);
+  const verifyTokens = num(spec?.verify_tokens);
+  const promptTokens = num(spec?.draft_prompt_tokens) + num(spec?.verify_prompt_tokens);
+  const completionTokens = draftTokens + verifyTokens;
+  const ttft = num(spec?.ttft_ms) || clientTtftMs;
+  const confidence = num(spec?.mean_draft_confidence);
+  const forkAt = num(spec?.fork_at_chars);
+
+  const legs: ChatResult['legs'] = [
+    {
+      role: 'draft',
+      model: draftModel,
+      costUsd: draftCost,
+      outcome: forked ? 'accepted' : 'ok',
+      displayOrder: 1,
+      temperature: null,
+      note: `${draftTokens} tok · ttft ${ttft}ms${confidence > 0 ? ` · conf ${(confidence * 100).toFixed(0)}%` : ''}`,
+    },
+  ];
+  if (forked && verifyModel) {
+    legs.push({
+      role: 'verify',
+      model: verifyModel,
+      costUsd: verifyCost,
+      outcome: 'composed',
+      displayOrder: 2,
+      temperature: null,
+      note: `${verifyTokens} tok · continued at ${forkAt} chars`,
+    });
+  }
+
+  return {
+    content,
+    model: finalModel,
+    provider: finalModel.includes('/') ? (finalModel.split('/')[0] ?? null) : null,
+    mode: 'speculative',
+    task: 'speculative',
+    attempts: null,
+    promptTokens,
+    completionTokens,
+    totalTokens: promptTokens + completionTokens,
+    cost: totalCost,
+    durationMs,
+    tokensPerSec: durationMs > 0 ? completionTokens / (durationMs / 1000) : 0,
+    pattern: 'speculative',
+    legs,
+    requestedN: null,
+    completedN: null,
+    diversityMode: forked ? 'forked' : 'draft-only',
+    judgeReason: forked
+      ? `Drafter uncertainty crossed the confidence gate at ${forkAt} chars — forked to the verifier for the rest.`
+      : 'Drafter stayed confident throughout — no fork needed.',
+  };
+}
+
 export async function playgroundChat(opts: {
   messages: ChatMessage[];
   model: string;
@@ -101,6 +255,12 @@ export async function playgroundChat(opts: {
   const body: Record<string, unknown> = { model: opts.model, messages: opts.messages };
   if (opts.costTier) body.cost_tier = opts.costTier;
   if (opts.orchestrate) body.orchestrate = opts.orchestrate;
+
+  // Speculative decoding is streaming-only; consume the SSE stream server-side and
+  // fold the in-band `_speculative` summary into the same ChatResult shape.
+  if (opts.orchestrate === 'speculative') {
+    return speculativeChat(key, body, opts.model);
+  }
 
   const started = Date.now();
   try {

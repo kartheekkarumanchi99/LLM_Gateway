@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 import { getDb } from '@llmgw/db';
 import { buildServer } from './server';
 import { config } from './config';
+import { startSentinelWorker } from './sentinel/worker';
 
 const app = buildServer();
 
@@ -17,6 +18,8 @@ app
         .catch(() => {});
     }, 240_000);
     warm.unref();
+    // Drift Sentinel: background loop that evaluates shadow samples + re-weights routing.
+    startSentinelWorker();
   })
   .catch((err) => {
     app.log.error(err);

@@ -109,3 +109,27 @@ test('deterministic ordering for a fixed seed', () => {
     b.ranked.map((x) => x.slug),
   );
 });
+
+test('sentinel health penalty sheds traffic from a drifted model', () => {
+  const models = [m('a/strong', 1, 1), m('b/other', 1, 1)];
+  const prior = new Map([
+    ['a/strong', 9], // prior strongly favors a
+    ['b/other', 3],
+  ]);
+  const base = {
+    models,
+    ownSignal: new Map<string, OwnSignal>(),
+    prior,
+    estPromptTokens: 100,
+    estCompletionTokens: 100,
+    costTier: 'medium' as const,
+    explore: 0,
+    rngSeed: 7,
+  };
+  // Healthy: the prior-favored model wins.
+  assert.equal(rankCandidates(base).ranked[0]!.slug, 'a/strong');
+  // Drifted: a 0.3 routing weight on the leader flips the ranking to the healthy peer.
+  const penalized = rankCandidates({ ...base, health: new Map([['a/strong', 0.3]]) });
+  assert.equal(penalized.ranked[0]!.slug, 'b/other');
+});
+

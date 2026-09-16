@@ -36,6 +36,9 @@ export interface RankInput {
   weights?: { quality: number; signal: number; reliability: number };
   explore?: number;
   rngSeed?: number;
+  // Drift Sentinel routing weight per model (0..1, default 1). Shrinks a drifted
+  // model's benefit so it drops down (or off) the Pareto frontier — live re-weighting.
+  health?: Map<string, number>;
 }
 
 function normalize(values: number[]): number[] {
@@ -87,7 +90,8 @@ export function rankCandidates(input: RankInput): {
     const signal = alpha * ownShare + (1 - alpha) * priorShare;
     const quality = priorShare;
     const reliability = own ? own.successRate : 0.9;
-    const benefit = w.quality * quality + w.signal * signal + w.reliability * reliability;
+    const health = input.health?.get(m.slug) ?? 1;
+    const benefit = (w.quality * quality + w.signal * signal + w.reliability * reliability) * health;
     return { m, signal, quality, reliability, benefit, rawCost: rawCost[i]!, costNorm: costNormAll[i]! };
   });
 

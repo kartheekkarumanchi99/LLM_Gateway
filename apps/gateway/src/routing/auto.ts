@@ -6,6 +6,7 @@ import type { ChatMessage } from '../providers/types';
 import { approxPromptTokens, classifyTask } from './classify';
 import { getExecutableModels, getOwnSignal, getPriorSignal } from './data';
 import { rankCandidates } from './score';
+import { healthMapForTask } from '../sentinel/registry';
 import type { CostTier, RankedCandidate, TaskClass } from './types';
 
 export interface AutoRouteResult {
@@ -23,6 +24,9 @@ export async function autoRoute(opts: {
   guardrail: GuardrailPolicies | null;
   allowedModels: string[];
   keyedProviders?: Set<string>;
+  // The Drift Sentinel worker selects shadow candidates health-agnostically so a
+  // penalized model keeps being probed and can recover; production routing leaves this off.
+  ignoreHealth?: boolean;
 }): Promise<AutoRouteResult> {
   const taskClass = classifyTask(opts.messages);
   const estPromptTokens = approxPromptTokens(opts.messages);
@@ -56,6 +60,7 @@ export async function autoRoute(opts: {
     estPromptTokens,
     estCompletionTokens: opts.maxTokens,
     costTier: opts.costTier,
+    health: opts.ignoreHealth ? undefined : healthMapForTask(taskClass),
   });
   return { taskClass, ranked, alpha, ownRequests };
 }
