@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, Send, Sparkles, User } from 'lucide-react';
 import { sendChat } from '@/lib/chat-actions';
+import { MarkdownMessage } from '@/components/markdown-message';
 import { ModelPicker } from '@/components/model-picker';
 import { formatTokens } from '@/lib/format';
 import type { ChatMessage, ChatMeta, ChatResult } from '@/lib/chat-types';
@@ -231,11 +232,11 @@ function AssistantMessage({ item }: { item: Item }) {
       <div className="min-w-0 flex-1">
         <div
           className={
-            'whitespace-pre-wrap rounded-2xl rounded-tl-sm px-4 py-2 text-sm ' +
-            (item.error ? 'bg-red-50 text-red-700' : 'bg-gray-100 text-gray-800')
+            'rounded-2xl rounded-tl-sm px-4 py-2 text-sm ' +
+            (item.error ? 'whitespace-pre-wrap bg-red-50 text-red-700' : 'bg-gray-100 text-gray-800')
           }
         >
-          {item.content}
+          {item.error ? item.content : <MarkdownMessage content={item.content} />}
         </div>
 
         {meta ? (
