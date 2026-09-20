@@ -1,0 +1,27 @@
+# Render blueprint for the LLM Gateway API (persistent Fastify server).
+# The web dashboard deploys separately on Vercel and points at this service via GATEWAY_URL.
+services:
+  - type: web
+    name: llm-gateway-api
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    # Install the whole pnpm workspace, then bundle the gateway (tsup bundles @llmgw/db in).
+    buildCommand: npm i -g pnpm@10.9.0 && pnpm install && pnpm --filter @llmgw/gateway run build
+    startCommand: node apps/gateway/dist/main.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      # Secrets — set these in the Render dashboard (sync:false = not stored in the repo).
+      - key: DATABASE_URL
+        sync: false
+      - key: BYOK_ENCRYPTION_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
