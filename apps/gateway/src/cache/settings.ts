@@ -8,9 +8,10 @@ export interface WorkspaceSettingsRow {
   observability: unknown;
   predictive: unknown;
   sentinel: unknown;
+  cache: unknown;
 }
 
-const EMPTY: WorkspaceSettingsRow = { routing: null, tools: null, observability: null, predictive: null, sentinel: null };
+const EMPTY: WorkspaceSettingsRow = { routing: null, tools: null, observability: null, predictive: null, sentinel: null, cache: null };
 
 // One cached read of the workspace_settings row (all jsonb config columns), shared by
 // the routing/tools/observability/predictive getters — replacing four separate reads
@@ -24,6 +25,7 @@ const cache = createTtlCache<string, WorkspaceSettingsRow>(
         observability: workspaceSettings.observability,
         predictive: workspaceSettings.predictive,
         sentinel: workspaceSettings.sentinel,
+        cache: workspaceSettings.cache,
       })
       .from(workspaceSettings)
       .where(eq(workspaceSettings.workspaceId, workspaceId))

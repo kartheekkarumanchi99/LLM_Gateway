@@ -9,6 +9,8 @@ import { registerOptimize } from './routes/optimize';
 import { registerReliability } from './routes/reliability';
 import { registerEval } from './routes/eval';
 import { registerSentinel } from './routes/sentinel';
+import { registerReplay } from './routes/replay';
+import { registerArbitrage } from './routes/arbitrage';
 
 export function buildServer(): FastifyInstance {
   const app = Fastify({
@@ -28,6 +30,8 @@ export function buildServer(): FastifyInstance {
   registerReliability(app);
   registerEval(app);
   registerSentinel(app);
+  registerReplay(app);
+  registerArbitrage(app);
 
   return app;
 }

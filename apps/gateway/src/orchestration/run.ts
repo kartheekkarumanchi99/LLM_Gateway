@@ -5,6 +5,7 @@ import type { ChatCompletionRequest, ChatMessage } from '../providers/types';
 import { classifyTask } from '../routing/classify';
 import { autoRoute } from '../routing/auto';
 import type { CostTier, RankedCandidate } from '../routing/types';
+import { recordDag, seedFor, type CapturedNode } from '../replay/capture';
 import type { GuardrailPolicies } from '@llmgw/db';
 
 // HydraFusion-style compound workflows on top of the single-model router.
@@ -25,6 +26,8 @@ export interface OrchestrationCtx {
   allowedModels: string[];
   maxTokens: number;
   keyedProviders?: Set<string>;
+  // State-replay DAG collector: callLeg pushes a captured node per executed leg.
+  capture?: CapturedNode[];
 }
 
 export interface OrchestrationLeg {
@@ -163,10 +166,12 @@ async function callLeg(
       continue;
     }
 
+    const seed = seedFor(ctx.requestId, role);
     const body = {
       model: model.upstreamModel,
       messages,
       max_tokens: maxTokens,
+      seed,
       ...(temperature != null ? { temperature } : {}),
     } as ChatCompletionRequest;
     const started = Date.now();
@@ -199,8 +204,29 @@ async function callLeg(
         appName: ctx.appName,
         traceId: ctx.traceId ?? ctx.requestId,
       });
+      const content = extractContent(json);
+      if (ctx.capture) {
+        const choice0 = (json.choices as Array<{ message?: { tool_calls?: unknown } }> | undefined)?.[0];
+        ctx.capture.push({
+          nodeKey: role,
+          parentKey: null,
+          seq: 0,
+          role,
+          model: model.slug,
+          provider: model.providerSlug,
+          messages,
+          params: { temperature: temperature ?? null, topP: null, maxTokens, seed },
+          output: content,
+          toolCalls: choice0?.message?.tool_calls ?? null,
+          promptTokens: usage.promptTokens,
+          completionTokens: usage.completionTokens,
+          costUsd: cost,
+          latencyMs,
+          outcome: 'ok',
+        });
+      }
       return {
-        content: extractContent(json),
+        content,
         leg: {
           role,
           model: model.slug,
@@ -757,11 +783,28 @@ export async function runOrchestration(opts: {
   if (cheapChain.length === 0) {
     return { ...emptyResult(opts.pattern, taskClass), error: 'No runnable model available for orchestration.' };
   }
+  // Collect the execution DAG for deterministic state replay.
+  opts.ctx.capture = [];
+  let result: OrchestrationResult;
   if (opts.pattern === 'critique')
-    return runCritique(opts.ctx, opts.messages, cheapChain, strongChain, taskClass);
-  if (opts.pattern === 'bestofn')
-    return runBestOfN(opts.ctx, opts.messages, cheapChain, strongChain, taskClass);
-  if (opts.pattern === 'decompose')
-    return runDecompose(opts.ctx, opts.messages, cheapChain, strongChain, taskClass);
-  return runCascade(opts.ctx, opts.messages, cheapChain, strongChain, taskClass);
+    result = await runCritique(opts.ctx, opts.messages, cheapChain, strongChain, taskClass);
+  else if (opts.pattern === 'bestofn')
+    result = await runBestOfN(opts.ctx, opts.messages, cheapChain, strongChain, taskClass);
+  else if (opts.pattern === 'decompose')
+    result = await runDecompose(opts.ctx, opts.messages, cheapChain, strongChain, taskClass);
+  else result = await runCascade(opts.ctx, opts.messages, cheapChain, strongChain, taskClass);
+
+  if (opts.ctx.capture.length > 0 && result.content) {
+    void recordDag({
+      requestId: opts.ctx.requestId,
+      traceId: opts.ctx.traceId ?? opts.ctx.requestId,
+      orgId: opts.ctx.orgId,
+      workspaceId: opts.ctx.workspaceId,
+      pattern: opts.pattern,
+      rootMessages: opts.messages,
+      finalOutput: result.content,
+      nodes: opts.ctx.capture,
+    });
+  }
+  return result;
 }

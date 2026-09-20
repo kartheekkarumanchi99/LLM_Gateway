@@ -34,6 +34,8 @@ export * from './providers-catalog';
 export * from './optimization-config';
 export * from './eval-config';
 export * from './sentinel-config';
+export * from './dedup-config';
+export * from './arbitrage-config';
 
 let httpDb: NeonHttpDatabase<typeof schema> | undefined;
 

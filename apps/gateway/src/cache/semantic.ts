@@ -1,18 +1,22 @@
 import { createHash } from 'node:crypto';
-import { and, desc, eq, sql } from 'drizzle-orm';
-import { getDb, responseCache } from '@llmgw/db';
+import { eq, sql } from 'drizzle-orm';
+import { cacheHits, getDb, responseCache, type DedupConfig } from '@llmgw/db';
 import { config } from '../config';
 import { resolveProviderKey } from '../providers/keys';
 import type { ChatMessage } from '../providers/types';
 
-// Semantic + exact response cache. A hit returns a stored completion at ~zero
-// upstream cost, which is the largest model-agnostic cost-optimization lever.
+// Cross-workspace, zero-latency semantic prompt-dedup cache.
+//
+// Layer 1 — exact SHA-256 prompt match (free, always on).
+// Layer 2 — semantic pgvector HNSW ANN match (opt-in): embed the query and find the nearest
+//           prior completion by cosine similarity, gated on a threshold + freshness window.
+// Within an org, a workspace can CONTRIBUTE its completions to a shared pool and/or CONSUME
+// cross-workspace hits (both opt-in). A hit returns a stored completion at ~zero upstream cost.
 
-const SEMANTIC_THRESHOLD = Number(process.env.SEMANTIC_CACHE_THRESHOLD ?? 0.93);
-const SEMANTIC_SCAN = Number(process.env.SEMANTIC_CACHE_SCAN ?? 300);
 const EMBED_MODEL = 'text-embedding-3-small';
 const EMBED_PRICE_PER_M = 0.02; // USD per 1M tokens
 const EMBED_TIMEOUT_MS = Number(process.env.EMBED_TIMEOUT_MS ?? 4000); // never hang routing on a slow embed
+const ANN_CANDIDATES = 10; // nearest neighbors fetched from the HNSW index before threshold check
 
 export interface CacheHit {
   kind: 'exact' | 'semantic';
@@ -23,21 +27,27 @@ export interface CacheHit {
   promptTokens: number;
   completionTokens: number;
   embedCostUsd: number;
+  crossWorkspace: boolean;
+  sourceWorkspaceId: string | null;
 }
 
 export interface CacheLookup {
   hit: CacheHit | null;
-  // Query embedding computed during lookup, reusable by storeCache on a miss.
-  queryEmbedding: number[] | null;
+  queryEmbedding: number[] | null; // reusable by storeCache on a miss
   embedCostUsd: number;
+}
+
+export interface LookupParams {
+  workspaceId: string;
+  orgId: string;
+  messages: ChatMessage[];
+  taskClass: string;
+  cfg: DedupConfig;
 }
 
 function normalize(messages: ChatMessage[]): string {
   return messages
-    .map(
-      (m) =>
-        `${m.role}:${typeof m.content === 'string' ? m.content.trim() : JSON.stringify(m.content)}`,
-    )
+    .map((m) => `${m.role}:${typeof m.content === 'string' ? m.content.trim() : JSON.stringify(m.content)}`)
     .join('\n');
 }
 
@@ -54,6 +64,10 @@ function queryText(messages: ChatMessage[]): string {
   return normalize(messages);
 }
 
+export function lastUserChars(messages: ChatMessage[]): number {
+  return queryText(messages).trim().length;
+}
+
 async function embed(orgId: string, text: string): Promise<{ vec: number[]; costUsd: number } | null> {
   const { key } = await resolveProviderKey(orgId, 'openai');
   if (!key) return null;
@@ -67,10 +81,7 @@ async function embed(orgId: string, text: string): Promise<{ vec: number[]; cost
       signal: ctrl.signal,
     });
     if (!res.ok) return null;
-    const json = (await res.json()) as {
-      data?: { embedding?: number[] }[];
-      usage?: { total_tokens?: number };
-    };
+    const json = (await res.json()) as { data?: { embedding?: number[] }[]; usage?: { total_tokens?: number } };
     const vec = json.data?.[0]?.embedding;
     if (!Array.isArray(vec)) return null;
     const tokens = json.usage?.total_tokens ?? 0;
@@ -80,19 +91,6 @@ async function embed(orgId: string, text: string): Promise<{ vec: number[]; cost
   } finally {
     clearTimeout(timer);
   }
-}
-
-function cosine(a: number[], b: number[]): number {
-  let dot = 0;
-  let na = 0;
-  let nb = 0;
-  const n = Math.min(a.length, b.length);
-  for (let i = 0; i < n; i++) {
-    dot += a[i]! * b[i]!;
-    na += a[i]! * a[i]!;
-    nb += b[i]! * b[i]!;
-  }
-  return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
 }
 
 function bumpHit(id: string): void {
@@ -105,106 +103,105 @@ function bumpHit(id: string): void {
     .catch(() => {});
 }
 
-export async function lookupCache(
-  workspaceId: string,
-  orgId: string,
-  messages: ChatMessage[],
-  taskClass: string,
-  opts?: { semantic?: boolean },
-): Promise<CacheLookup> {
+function vecLiteral(vec: number[]): string {
+  return `[${vec.join(',')}]`;
+}
+
+interface Row {
+  id: string;
+  response: unknown;
+  model: string;
+  provider: string;
+  promptTokens: number;
+  completionTokens: number;
+  workspaceId: string | null;
+  similarity: number;
+}
+
+function toHit(
+  r: Row,
+  kind: 'exact' | 'semantic',
+  similarity: number,
+  selfWorkspaceId: string,
+  embedCostUsd = 0,
+): CacheHit {
+  return {
+    kind,
+    similarity,
+    response: r.response as Record<string, unknown>,
+    model: r.model,
+    provider: r.provider,
+    promptTokens: r.promptTokens,
+    completionTokens: r.completionTokens,
+    embedCostUsd,
+    crossWorkspace: r.workspaceId != null && r.workspaceId !== selfWorkspaceId,
+    sourceWorkspaceId: r.workspaceId,
+  };
+}
+
+export async function lookupCache(params: LookupParams): Promise<CacheLookup> {
+  const { workspaceId, orgId, messages, taskClass, cfg } = params;
   const db = getDb();
   const hash = promptHashOf(messages);
+  const since = new Date(Date.now() - cfg.ttlHours * 3_600_000);
+  // Scope: own workspace always; other workspaces only if the consumer opted into
+  // cross-workspace AND the producer marked the entry shared.
+  const scope = cfg.crossWorkspace
+    ? sql`(rc.workspace_id = ${workspaceId} OR (rc.org_id = ${orgId} AND rc.shared = true))`
+    : sql`rc.workspace_id = ${workspaceId}`;
 
-  // 1) Exact match — always on: a single indexed lookup, no embedding.
-  let exactRows;
+  // 1) Exact match — prefer own workspace, then a fresh shared org entry.
   try {
-    exactRows = await db
-      .select({
-        id: responseCache.id,
-        response: responseCache.response,
-        model: responseCache.model,
-        provider: responseCache.provider,
-        promptTokens: responseCache.promptTokens,
-        completionTokens: responseCache.completionTokens,
-      })
-      .from(responseCache)
-      .where(and(eq(responseCache.workspaceId, workspaceId), eq(responseCache.promptHash, hash)))
-      .limit(1);
+    const exact = await db.execute(sql`
+      SELECT rc.id, rc.response, rc.model, rc.provider,
+             rc.prompt_tokens AS "promptTokens", rc.completion_tokens AS "completionTokens",
+             rc.workspace_id AS "workspaceId", 1.0 AS "similarity"
+      FROM response_cache rc
+      WHERE rc.prompt_hash = ${hash} AND rc.created_at > ${since} AND ${scope}
+      ORDER BY (rc.workspace_id = ${workspaceId}) DESC, rc.created_at DESC
+      LIMIT 1
+    `);
+    const ex = (exact.rows as unknown as Row[])[0];
+    if (ex) {
+      bumpHit(ex.id);
+      return { hit: toHit(ex, 'exact', 1, workspaceId), queryEmbedding: null, embedCostUsd: 0 };
+    }
   } catch (err) {
     console.error('[cache] exact lookup failed:', (err as Error).message);
     return { hit: null, queryEmbedding: null, embedCostUsd: 0 };
   }
-  const ex = exactRows[0];
-  if (ex) {
-    bumpHit(ex.id);
-    return {
-      hit: {
-        kind: 'exact',
-        similarity: 1,
-        response: ex.response as Record<string, unknown>,
-        model: ex.model,
-        provider: ex.provider,
-        promptTokens: ex.promptTokens,
-        completionTokens: ex.completionTokens,
-        embedCostUsd: 0,
-      },
-      queryEmbedding: null,
-      embedCostUsd: 0,
-    };
-  }
 
-  // Semantic matching is opt-in — the fast default path stops here (no embed, no scan).
-  if (!opts?.semantic) return { hit: null, queryEmbedding: null, embedCostUsd: 0 };
-
-  // 2) Semantic candidates in the same task class.
-  let candRows;
-  try {
-    candRows = await db
-      .select({
-        id: responseCache.id,
-        embedding: responseCache.embedding,
-        response: responseCache.response,
-        model: responseCache.model,
-        provider: responseCache.provider,
-        promptTokens: responseCache.promptTokens,
-        completionTokens: responseCache.completionTokens,
-      })
-      .from(responseCache)
-      .where(and(eq(responseCache.workspaceId, workspaceId), eq(responseCache.taskClass, taskClass)))
-      .orderBy(desc(responseCache.createdAt))
-      .limit(SEMANTIC_SCAN);
-  } catch (err) {
-    console.error('[cache] semantic candidates failed:', (err as Error).message);
-    return { hit: null, queryEmbedding: null, embedCostUsd: 0 };
-  }
-  if (candRows.length === 0) return { hit: null, queryEmbedding: null, embedCostUsd: 0 };
+  // Semantic (Layer 2) is opt-in.
+  if (!cfg.enabled) return { hit: null, queryEmbedding: null, embedCostUsd: 0 };
 
   const emb = await embed(orgId, queryText(messages));
   if (!emb) return { hit: null, queryEmbedding: null, embedCostUsd: 0 };
+  const vlit = vecLiteral(emb.vec);
 
-  let best: { id: string; sim: number; row: (typeof candRows)[number] } | null = null;
-  for (const r of candRows) {
-    const v = r.embedding as number[] | null;
-    if (!Array.isArray(v)) continue;
-    const sim = cosine(emb.vec, v);
-    if (!best || sim > best.sim) best = { id: r.id, sim, row: r };
-  }
-  if (best && best.sim >= SEMANTIC_THRESHOLD) {
-    bumpHit(best.id);
-    return {
-      hit: {
-        kind: 'semantic',
-        similarity: best.sim,
-        response: best.row.response as Record<string, unknown>,
-        model: best.row.model,
-        provider: best.row.provider,
-        promptTokens: best.row.promptTokens,
-        completionTokens: best.row.completionTokens,
+  // 2) pgvector HNSW ANN: nearest prior completions by cosine, within scope + freshness.
+  try {
+    const ann = await db.execute(sql`
+      SELECT rc.id, rc.response, rc.model, rc.provider,
+             rc.prompt_tokens AS "promptTokens", rc.completion_tokens AS "completionTokens",
+             rc.workspace_id AS "workspaceId",
+             1 - (rc.embedding_vec <=> ${vlit}::vector) AS "similarity"
+      FROM response_cache rc
+      WHERE rc.embedding_vec IS NOT NULL AND rc.task_class = ${taskClass}
+        AND rc.created_at > ${since} AND ${scope}
+      ORDER BY rc.embedding_vec <=> ${vlit}::vector
+      LIMIT ${ANN_CANDIDATES}
+    `);
+    const best = (ann.rows as unknown as Row[])[0]; // ORDER BY distance → row 0 is the nearest
+    if (best && Number(best.similarity) >= cfg.similarityThreshold) {
+      bumpHit(best.id);
+      return {
+        hit: toHit(best, 'semantic', Number(best.similarity), workspaceId, emb.costUsd),
+        queryEmbedding: emb.vec,
         embedCostUsd: emb.costUsd,
-      },
-      queryEmbedding: emb.vec,
-      embedCostUsd: emb.costUsd,
-    };
+      };
+    }
+  } catch (err) {
+    console.error('[cache] ANN lookup failed:', (err as Error).message);
   }
   return { hit: null, queryEmbedding: emb.vec, embedCostUsd: emb.costUsd };
 }
@@ -220,22 +217,27 @@ export async function storeCache(opts: {
   promptTokens: number;
   completionTokens: number;
   embedding?: number[] | null;
-  semantic?: boolean;
+  cfg: DedupConfig;
+  sensitive?: boolean;
 }): Promise<void> {
   try {
     const db = getDb();
     const hash = promptHashOf(opts.messages);
-    // Only spend an embedding when semantic matching is enabled; exact-match hits don't
-    // need one, so the default fast path stores with a null embedding.
-    const vec =
-      opts.embedding ?? (opts.semantic ? ((await embed(opts.orgId, queryText(opts.messages)))?.vec ?? null) : null);
+    // Embed only when semantic matching is on; reuse the query embedding from lookup if present.
+    const vec = opts.cfg.enabled
+      ? (opts.embedding ?? (await embed(opts.orgId, queryText(opts.messages)))?.vec ?? null)
+      : null;
+    // Sensitive prompts are never shared to the org pool, regardless of the contribute flag.
+    const shared = opts.cfg.contribute && !opts.sensitive;
     await db
       .insert(responseCache)
       .values({
         workspaceId: opts.workspaceId,
+        orgId: opts.orgId,
         promptHash: hash,
         taskClass: opts.taskClass,
-        embedding: vec,
+        embeddingVec: vec,
+        shared,
         model: opts.model,
         provider: opts.provider,
         response: opts.response,
@@ -246,4 +248,34 @@ export async function storeCache(opts: {
   } catch (err) {
     console.error('[cache] store failed:', (err as Error).message);
   }
+}
+
+// Analytics ledger: one row per cache-served request with the counterfactual USD saved.
+export function recordCacheHit(p: {
+  orgId: string;
+  workspaceId: string;
+  sourceWorkspaceId: string | null;
+  requestId: string;
+  kind: 'exact' | 'semantic';
+  similarity: number;
+  crossWorkspace: boolean;
+  model: string;
+  savedUsd: number;
+}): void {
+  const db = getDb();
+  void db
+    .insert(cacheHits)
+    .values({
+      orgId: p.orgId,
+      workspaceId: p.workspaceId,
+      sourceWorkspaceId: p.sourceWorkspaceId,
+      requestId: p.requestId,
+      kind: p.kind,
+      similarity: p.similarity.toFixed(4),
+      crossWorkspace: p.crossWorkspace,
+      model: p.model,
+      savedUsd: p.savedUsd.toFixed(10),
+    })
+    .execute()
+    .catch((e) => console.error('[cache] hit ledger failed:', (e as Error).message));
 }

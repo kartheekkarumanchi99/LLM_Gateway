@@ -9,6 +9,7 @@ import {
   timestamp,
   uniqueIndex,
   uuid,
+  vector,
 } from 'drizzle-orm/pg-core';
 
 export const organizations = pgTable('organizations', {
@@ -174,6 +175,8 @@ export const workspaceSettings = pgTable('workspace_settings', {
   predictive: jsonb('predictive'),
   // Shadow Model Drift & Regression Sentinel config (SentinelConfig).
   sentinel: jsonb('sentinel'),
+  // Cross-workspace semantic prompt-dedup cache config (DedupConfig).
+  cache: jsonb('cache'),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -306,11 +309,17 @@ export const responseCache = pgTable(
   {
     id: uuid('id').primaryKey().defaultRandom(),
     workspaceId: uuid('workspace_id').references(() => workspaces.id, { onDelete: 'cascade' }),
+    // Org that owns this entry — enables cross-workspace dedup within an org.
+    orgId: uuid('org_id').references(() => organizations.id, { onDelete: 'cascade' }),
     // sha256 of the normalized messages — exact-match key.
     promptHash: text('prompt_hash').notNull(),
     taskClass: text('task_class'),
-    // text-embedding-3-small vector for semantic matching (stored as JSON array).
+    // text-embedding-3-small vector for semantic matching (legacy JSON array).
     embedding: jsonb('embedding'),
+    // pgvector column backing the HNSW ANN index (real cosine nearest-neighbor search).
+    embeddingVec: vector('embedding_vec', { dimensions: 1536 }),
+    // Whether this entry may satisfy other workspaces in the org (contribute opt-in).
+    shared: boolean('shared').notNull().default(false),
     model: text('model').notNull(),
     provider: text('provider').notNull(),
     // Stored OpenAI-shaped response body (choices + usage).
@@ -324,6 +333,30 @@ export const responseCache = pgTable(
   (t) => ({
     wsHashIdx: index('response_cache_ws_hash_idx').on(t.workspaceId, t.promptHash),
     wsTaskIdx: index('response_cache_ws_task_idx').on(t.workspaceId, t.taskClass),
+    orgTaskIdx: index('response_cache_org_task_idx').on(t.orgId, t.taskClass, t.createdAt),
+  }),
+);
+
+// Analytics ledger for dedup-cache hits: one row per served-from-cache request, capturing
+// the counterfactual USD saved + whether it was a cross-workspace reuse.
+export const cacheHits = pgTable(
+  'cache_hits',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id').notNull(),
+    workspaceId: uuid('workspace_id').notNull(),
+    sourceWorkspaceId: uuid('source_workspace_id'),
+    requestId: text('request_id').notNull(),
+    kind: text('kind').notNull(), // 'exact' | 'semantic'
+    similarity: numeric('similarity', { precision: 6, scale: 4 }).notNull().default('1'),
+    crossWorkspace: boolean('cross_workspace').notNull().default(false),
+    model: text('model').notNull(),
+    savedUsd: numeric('saved_usd', { precision: 20, scale: 10 }).notNull().default('0'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    orgIdx: index('cache_hits_org_idx').on(t.orgId, t.createdAt),
+    wsIdx: index('cache_hits_ws_idx').on(t.workspaceId, t.createdAt),
   }),
 );
 
@@ -775,6 +808,147 @@ export const driftEvents = pgTable(
   (t) => ({
     modelIdx: index('drift_events_model_idx').on(t.modelSlug, t.taskClass, t.createdAt),
     openIdx: index('drift_events_open_idx').on(t.resolvedAt),
+  }),
+);
+
+// ---- Deterministic State Replay / Time-Machine ----
+// The full execution DAG of a request: one row per node (orchestration leg or single call)
+// with the EXACT input, params (temperature/top-p/seed), raw output, and cost — enough to
+// deterministically re-run any node. `replayId` is null for originally-captured nodes and
+// set for the forked nodes produced by a replay.
+export const traceNodes = pgTable(
+  'trace_nodes',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    requestId: text('request_id').notNull(),
+    traceId: text('trace_id'),
+    orgId: uuid('org_id').references(() => organizations.id, { onDelete: 'cascade' }),
+    workspaceId: uuid('workspace_id').references(() => workspaces.id, { onDelete: 'cascade' }),
+    replayId: uuid('replay_id'),
+    pattern: text('pattern').notNull(),
+    // Stable key within a trace: 'root' | 'draft' | 'critic' | 'revise' | 'gate' | 'final' |
+    // 'candidate_1' | 'judge' | 'planner' | 'subtask_2' | 'compose'.
+    nodeKey: text('node_key').notNull(),
+    parentKey: text('parent_key'),
+    seq: integer('seq').notNull().default(0),
+    role: text('role').notNull(),
+    model: text('model').notNull().default(''),
+    provider: text('provider').notNull().default(''),
+    // Exact ChatMessage[] sent upstream for this node.
+    messages: jsonb('messages'),
+    // { temperature, topP, maxTokens, seed }.
+    params: jsonb('params'),
+    output: text('output'),
+    toolCalls: jsonb('tool_calls'),
+    promptTokens: integer('prompt_tokens').notNull().default(0),
+    completionTokens: integer('completion_tokens').notNull().default(0),
+    costUsd: numeric('cost_usd', { precision: 20, scale: 10 }).notNull().default('0'),
+    latencyMs: integer('latency_ms').notNull().default(0),
+    outcome: text('outcome').notNull().default('ok'),
+    note: text('note'),
+    // True for the single node changed in a replay fork.
+    overridden: boolean('overridden').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    reqIdx: index('trace_nodes_request_idx').on(t.requestId, t.seq),
+    traceIdx: index('trace_nodes_trace_idx').on(t.traceId),
+    replayIdx: index('trace_nodes_replay_idx').on(t.replayId),
+  }),
+);
+
+// A replay session: re-executes a captured request from one overridden node forward.
+export const traceReplays = pgTable(
+  'trace_replays',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    originalRequestId: text('original_request_id').notNull(),
+    traceId: text('trace_id'),
+    orgId: uuid('org_id').references(() => organizations.id, { onDelete: 'cascade' }),
+    workspaceId: uuid('workspace_id').references(() => workspaces.id, { onDelete: 'cascade' }),
+    overrideNodeKey: text('override_node_key').notNull(),
+    // { model?, temperature?, topP?, prompt?, seed? } — the single change applied.
+    override: jsonb('override'),
+    pattern: text('pattern').notNull(),
+    finalOutput: text('final_output'),
+    originalOutput: text('original_output'),
+    totalCostUsd: numeric('total_cost_usd', { precision: 20, scale: 10 }).notNull().default('0'),
+    latencyMs: integer('latency_ms').notNull().default(0),
+    status: text('status').notNull().default('running'), // 'running' | 'complete' | 'error'
+    error: text('error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+  },
+  (t) => ({
+    orgIdx: index('trace_replays_org_idx').on(t.orgId, t.createdAt),
+    reqIdx: index('trace_replays_request_idx').on(t.originalRequestId),
+  }),
+);
+
+// ---- Multi-Tenant Financial Arbitrage & BYOK Rate-Limit Balancing ----
+// Per-org participation in the cross-tenant capacity pool: an org may CONTRIBUTE its
+// under-utilized BYOK throughput and/or CONSUME other orgs' spare capacity when throttled.
+export const arbitrageSettings = pgTable('arbitrage_settings', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  orgId: uuid('org_id')
+    .notNull()
+    .unique()
+    .references(() => organizations.id, { onDelete: 'cascade' }),
+  enabled: boolean('enabled').notNull().default(false),
+  contribute: boolean('contribute').notNull().default(false),
+  consume: boolean('consume').notNull().default(false),
+  // Markup a lender earns over the raw provider cost when its key serves a borrower.
+  marginPct: numeric('margin_pct', { precision: 6, scale: 2 }).notNull().default('10'),
+  // Ceiling on tokens/min this org will lend out (protects the lender's own headroom).
+  maxShareTpm: integer('max_share_tpm').notNull().default(100000),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// The known rate limit of an org's BYOK key for a provider (its enterprise/tier ceiling),
+// plus whether that capacity may be shared into the pool.
+export const byokLimits = pgTable(
+  'byok_limits',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    provider: text('provider').notNull(),
+    tpmLimit: integer('tpm_limit').notNull().default(0),
+    rpmLimit: integer('rpm_limit').notNull().default(0),
+    // Contribute THIS provider's capacity to the pool.
+    shareable: boolean('shareable').notNull().default(false),
+    tier: text('tier'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    uq: uniqueIndex('byok_limits_uq').on(t.orgId, t.provider),
+  }),
+);
+
+// Settlement ledger: one row per cross-tenant borrow. The borrower is charged the transfer
+// price; the lender is reimbursed it (their real provider bill is provider_cost_usd, so the
+// lender nets the margin). Paired with credit_ledger arbitrage_debit/arbitrage_credit rows.
+export const capacityLoans = pgTable(
+  'capacity_loans',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    borrowerOrgId: uuid('borrower_org_id').notNull(),
+    lenderOrgId: uuid('lender_org_id').notNull(),
+    provider: text('provider').notNull(),
+    model: text('model').notNull(),
+    requestId: text('request_id').notNull().unique(),
+    promptTokens: integer('prompt_tokens').notNull().default(0),
+    completionTokens: integer('completion_tokens').notNull().default(0),
+    providerCostUsd: numeric('provider_cost_usd', { precision: 20, scale: 10 }).notNull().default('0'),
+    transferPriceUsd: numeric('transfer_price_usd', { precision: 20, scale: 10 }).notNull().default('0'),
+    marginUsd: numeric('margin_usd', { precision: 20, scale: 10 }).notNull().default('0'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    borrowerIdx: index('capacity_loans_borrower_idx').on(t.borrowerOrgId, t.createdAt),
+    lenderIdx: index('capacity_loans_lender_idx').on(t.lenderOrgId, t.createdAt),
   }),
 );
 

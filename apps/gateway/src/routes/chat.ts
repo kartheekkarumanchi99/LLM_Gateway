@@ -7,6 +7,7 @@ import type { ChatCompletionRequest, Usage } from '../providers/types';
 import { resolveModel, type ResolvedModel } from '../routing/resolve';
 import { autoRoute } from '../routing/auto';
 import { classifyTask } from '../routing/classify';
+import { approxPromptTokens } from '../routing/classify';
 import { isCostTier, type CandidateModel, type CostTier, type RoutingTrace } from '../routing/types';
 import { getPredictiveConfig, getRoutingConfig, getToolsConfig } from '../routing/config';
 import { resolvePreset } from '../routing/presets';
@@ -15,7 +16,8 @@ import { emitObservability } from '../observability/emit';
 import { runClassifiersForRequest } from '../classifiers/run';
 import { maybeLowBalanceAlert } from '../notifications/alerts';
 import { runOrchestration } from '../orchestration/run';
-import { lookupCache, storeCache } from '../cache/semantic';
+import { lookupCache, storeCache, recordCacheHit, lastUserChars } from '../cache/semantic';
+import { getCacheConfig } from '../cache/config';
 import { predict, warmPredictorStats, type Prediction } from '../routing/predict';
 import { recordPredictiveEvent } from '../routing/predict-record';
 import { runSpeculativeAuto } from '../routing/speculate';
@@ -27,6 +29,10 @@ import { keyUsageUsd, getWorkspaceBudget, workspaceUsageUsd } from '../billing/u
 import { getGuardrailForKey } from '../guardrails/load';
 import { checkContent, checkModelAccess } from '../guardrails/enforce';
 import { maybeShadowSample } from '../sentinel/sample';
+import { recordDag } from '../replay/capture';
+import { resolveCapacity } from '../arbitrage/resolve';
+import { recordConsumption, note429 } from '../arbitrage/limits';
+import { recordLoan } from '../arbitrage/settle';
 
 const ZERO_USAGE: Usage = {
   promptTokens: 0,
@@ -226,18 +232,25 @@ export function registerChat(app: FastifyInstance): void {
       });
     }
 
-    // ---- Semantic response cache: an exact/semantic hit short-circuits routing
-    // at ~zero upstream cost (the biggest model-agnostic cost lever) ----
-    // Exact-match cache is always cheap (one indexed lookup). Semantic matching adds a
-    // query-embedding round-trip + vector scan, so it's opt-in via SEMANTIC_CACHE=1.
+    // ---- Cross-workspace semantic dedup cache: an exact/semantic hit short-circuits
+    // routing at ~zero upstream cost (the biggest model-agnostic cost lever) ----
+    // Exact-match is always a cheap indexed lookup; semantic adds a query-embedding + a
+    // pgvector HNSW ANN scan, so it's opt-in per workspace (DedupConfig.enabled).
+    const cacheCfg = await getCacheConfig(auth.workspaceId);
     const cacheEnabled =
       !body.stream &&
       (body as { cache?: unknown }).cache !== false &&
-      Number((body as { temperature?: number }).temperature ?? 0) <= 0.5;
-    const semanticEnabled = (process.env.SEMANTIC_CACHE ?? '0') === '1';
+      Number((body as { temperature?: number }).temperature ?? 0) <= 0.5 &&
+      lastUserChars(messages) >= cacheCfg.minChars;
     let cacheEmbedding: number[] | null = null;
     if (cacheEnabled) {
-      const lookup = await lookupCache(auth.workspaceId, auth.orgId, messages, taskClass, { semantic: semanticEnabled });
+      const lookup = await lookupCache({
+        workspaceId: auth.workspaceId,
+        orgId: auth.orgId,
+        messages,
+        taskClass,
+        cfg: cacheCfg,
+      });
       cacheEmbedding = lookup.queryEmbedding;
       if (lookup.hit) {
         const h = lookup.hit;
@@ -263,7 +276,24 @@ export function registerChat(app: FastifyInstance): void {
           appName,
           traceId,
           latencyMs: Date.now() - started,
-          routingTrace: { mode: 'cache', cacheKind: h.kind },
+          routingTrace: { mode: 'cache', cacheKind: h.kind, crossWorkspace: h.crossWorkspace },
+        });
+        // Dedup savings ledger: the counterfactual generation cost this reuse avoided.
+        const resolvedHit = await resolveModel(h.model);
+        const savedUsd = resolvedHit
+          ? (h.promptTokens / 1e6) * Number(resolvedHit.promptPricePerM) +
+            (h.completionTokens / 1e6) * Number(resolvedHit.completionPricePerM)
+          : 0;
+        recordCacheHit({
+          orgId: auth.orgId,
+          workspaceId: auth.workspaceId,
+          sourceWorkspaceId: h.sourceWorkspaceId,
+          requestId,
+          kind: h.kind,
+          similarity: h.similarity,
+          crossWorkspace: h.crossWorkspace,
+          model: h.model,
+          savedUsd,
         });
         void maybeLowBalanceAlert(auth.orgId, auth.workspaceId);
         return reply.send({
@@ -278,7 +308,14 @@ export function registerChat(app: FastifyInstance): void {
             provider: h.provider,
             attempts: 0,
           },
-          _cache: { hit: true, kind: h.kind, similarity: Number(h.similarity.toFixed(4)) },
+          _cache: {
+            hit: true,
+            kind: h.kind,
+            similarity: Number(h.similarity.toFixed(4)),
+            crossWorkspace: h.crossWorkspace,
+            sourceWorkspace: h.sourceWorkspaceId,
+            savedUsd: Number(savedUsd.toFixed(6)),
+          },
         });
       }
     }
@@ -595,8 +632,12 @@ export function registerChat(app: FastifyInstance): void {
           continue;
         }
       }
-      const providerKeyInfo = await resolveProviderKey(auth.orgId, cand.providerSlug);
-      if (!providerKeyInfo.key) {
+      // Cost-arbitrage key resolution: when this tenant is throttled/exhausted on the
+      // provider (soft rate limit or a recent 429), borrow spare BYOK capacity from a
+      // consenting lender org in the pool; otherwise use the tenant's own key.
+      const estTokens = approxPromptTokens(messages) + maxTokens;
+      const cap = await resolveCapacity(auth.orgId, cand.providerSlug, estTokens);
+      if (!cap.key) {
         trace.attempts.push({ slug: cand.slug, providerSlug: cand.providerSlug, result: 'skipped', reason: 'no provider key' });
         continue;
       }
@@ -607,7 +648,9 @@ export function registerChat(app: FastifyInstance): void {
         trace.attempts.push({ slug: cand.slug, providerSlug: cand.providerSlug, result: 'skipped', reason: 'circuit breaker open' });
         continue;
       }
-      const providerKey = providerKeyInfo.key;
+      const providerKey = cap.key;
+      // Consumption + settlement accrue to the key's owner (the lender when borrowed).
+      const capacityOwnerOrg = cap.borrowed && cap.lenderOrgId ? cap.lenderOrgId : auth.orgId;
 
       const billBase = {
         requestId,
@@ -617,7 +660,7 @@ export function registerChat(app: FastifyInstance): void {
         modelSlug: cand.slug,
         providerSlug: cand.providerSlug,
         taskClass,
-        byok: providerKeyInfo.isByok,
+        byok: cap.isByok,
         appName,
         traceId,
         routingOverheadMs: Date.now() - started,
@@ -638,6 +681,7 @@ export function registerChat(app: FastifyInstance): void {
           lastErr = err as Error & { status?: number };
           const st = (err as { status?: number }).status ?? 0;
           if (isProviderFault(st)) recordOutcome(cand.providerSlug, { ok: false, latencyMs: Date.now() - started, status: st });
+          if (st === 429) note429(auth.orgId, cand.providerSlug);
           trace.attempts.push({ slug: cand.slug, providerSlug: cand.providerSlug, result: 'error', reason: (err as Error).message });
           continue;
         }
@@ -685,6 +729,20 @@ export function registerChat(app: FastifyInstance): void {
           latencyMs: Date.now() - started,
           routingTrace: trace,
         });
+        recordConsumption(capacityOwnerOrg, cand.providerSlug, usage.totalTokens);
+        if (cap.borrowed && cap.lenderOrgId) {
+          void recordLoan({
+            borrowerOrgId: auth.orgId,
+            lenderOrgId: cap.lenderOrgId,
+            provider: cand.providerSlug,
+            model: cand.slug,
+            requestId,
+            promptTokens: usage.promptTokens,
+            completionTokens: usage.completionTokens,
+            providerCostUsd: cost,
+            marginPct: cap.lenderMarginPct,
+          });
+        }
         void emitObservability({
           config: obsConfig,
           workspaceId: auth.workspaceId,
@@ -762,6 +820,20 @@ export function registerChat(app: FastifyInstance): void {
           latencyMs: Date.now() - started,
           routingTrace: trace,
         });
+        recordConsumption(capacityOwnerOrg, cand.providerSlug, usage.totalTokens);
+        if (cap.borrowed && cap.lenderOrgId) {
+          void recordLoan({
+            borrowerOrgId: auth.orgId,
+            lenderOrgId: cap.lenderOrgId,
+            provider: cand.providerSlug,
+            model: cand.slug,
+            requestId,
+            promptTokens: usage.promptTokens,
+            completionTokens: usage.completionTokens,
+            providerCostUsd: cost,
+            marginPct: cap.lenderMarginPct,
+          });
+        }
         void emitObservability({
           config: obsConfig,
           workspaceId: auth.workspaceId,
@@ -800,6 +872,40 @@ export function registerChat(app: FastifyInstance): void {
           referenceTokens: usage.completionTokens,
           maxTokens,
         });
+        // State-replay: capture this single call as a root → final DAG so it's inspectable/replayable.
+        void recordDag({
+          requestId,
+          traceId,
+          orgId: auth.orgId,
+          workspaceId: auth.workspaceId,
+          pattern: 'single',
+          rootMessages: messages,
+          finalOutput: completionText,
+          nodes: [
+            {
+              nodeKey: 'final',
+              parentKey: 'root',
+              seq: 0,
+              role: 'final',
+              model: cand.slug,
+              provider: cand.providerSlug,
+              messages,
+              params: {
+                temperature: typeof (body as { temperature?: number }).temperature === 'number' ? (body as { temperature?: number }).temperature! : null,
+                topP: typeof (body as { top_p?: number }).top_p === 'number' ? (body as { top_p?: number }).top_p! : null,
+                maxTokens,
+                seed: typeof (body as { seed?: number }).seed === 'number' ? (body as { seed?: number }).seed! : null,
+              },
+              output: completionText,
+              toolCalls: (choice0?.message as { tool_calls?: unknown } | undefined)?.tool_calls ?? null,
+              promptTokens: usage.promptTokens,
+              completionTokens: usage.completionTokens,
+              costUsd: cost,
+              latencyMs: Date.now() - started,
+              outcome: 'ok',
+            },
+          ],
+        });
         if (prediction) {
           void recordPredictiveEvent({
             requestId,
@@ -834,7 +940,8 @@ export function registerChat(app: FastifyInstance): void {
             promptTokens: usage.promptTokens,
             completionTokens: usage.completionTokens,
             embedding: cacheEmbedding,
-            semantic: semanticEnabled,
+            cfg: cacheCfg,
+            sensitive: sensitiveFlagged,
           });
         }
         const enriched = {
@@ -856,12 +963,16 @@ export function registerChat(app: FastifyInstance): void {
                 }
               : {}),
           },
+          _arbitrage: cap.borrowed
+            ? { borrowed: true, lenderOrg: cap.lenderOrgId, marginPct: cap.lenderMarginPct }
+            : { borrowed: false, ownThrottled: cap.ownThrottled },
         };
         return reply.send(enriched);
       } catch (err) {
         lastErr = err as Error & { status?: number };
         const st = (err as { status?: number }).status ?? 0;
         if (isProviderFault(st)) recordOutcome(cand.providerSlug, { ok: false, latencyMs: Date.now() - started, status: st });
+        if (st === 429) note429(auth.orgId, cand.providerSlug);
         trace.attempts.push({ slug: cand.slug, providerSlug: cand.providerSlug, result: 'error', reason: (err as Error).message });
         continue;
       }
